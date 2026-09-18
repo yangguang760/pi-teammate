@@ -109,7 +109,10 @@ if (!pi1.sentUserMessages.some((m) => String(m.content).includes("PRE-CRASH"))) 
 console.log("✓ phase 1: pre-crash delivery works");
 
 // ── Phase 2: alice CRASHES (kill timer, never stop()) ─────────
-if ((m1 as any).pollTimer !== null) clearInterval((m1 as any).pollTimer);
+for (const key of ["pollTimer", "leaseTimer"] as const) {
+  const t = (m1 as any)[key];
+  if (t !== null && t !== undefined) clearInterval(t);
+}
 console.log("✓ phase 2: alice process killed (no stop(), zombie row stays)");
 
 // ── Phase 3: downtime — bob sends messages into the void ──────
