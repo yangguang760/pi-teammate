@@ -119,12 +119,16 @@ export interface MamoruConfig {
   pollIntervalMs: number; // default 1000
   taskTimeoutMinutes: number; // default 20
   pingTimeoutSeconds: number; // default 20
+  leaseRenewalMs: number; // default 2000 — presence lease renewal interval (extension timer, no LLM)
+  leaseTtlMs: number; // default 30000 — lease considered expired after this long without renewal
 }
 
 export const DEFAULT_MAMORU_CONFIG: MamoruConfig = {
   pollIntervalMs: 1000,
   taskTimeoutMinutes: 20,
   pingTimeoutSeconds: 20,
+  leaseRenewalMs: 2000,
+  leaseTtlMs: 30_000,
 };
 
 // ── Outbound Task Tracking (requester side) ─────────────────────

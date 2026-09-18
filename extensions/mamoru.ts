@@ -28,6 +28,8 @@ import {
   getAgentBySession,
   initCursor,
   takeoverIdentity,
+  isLeaseAlive,
+  markStaleAgentsInactive,
 } from "./db.ts";
 import { Roster } from "./roster.ts";
 
@@ -77,6 +79,7 @@ export class Mamoru {
   private teammateDir: string;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private leaseTimer: ReturnType<typeof setInterval> | null = null;
   private startedAt: number | null = null;
   private status: AgentStatus = "available";
   private activeTask: ActiveTask | null = null;
@@ -161,6 +164,17 @@ export class Mamoru {
     // Start polling
     this.startedAt = Date.now();
     this.pollTimer = setInterval(() => this.pollOnce(), this.config.pollIntervalMs);
+
+    // Presence lease: renew on an extension timer, independent of the LLM.
+    // A dead process stops renewing; peers see the lease expire within
+    // leaseTtlMs (instead of never — heartbeats used to ride on pings).
+    this.leaseTimer = setInterval(() => {
+      try {
+        updateHeartbeat(this.db, this.sessionId);
+      } catch {
+        // DB closed during shutdown — nothing to renew
+      }
+    }, this.config.leaseRenewalMs);
   }
 
   /** Broadcast agent_leave, mark inactive, clear timer. */
@@ -169,6 +183,12 @@ export class Mamoru {
     if (this.pollTimer !== null) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+
+    // Stop renewing the presence lease
+    if (this.leaseTimer !== null) {
+      clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
     }
 
     // Broadcast agent_leave
@@ -401,6 +421,14 @@ export class Mamoru {
     // Sync agent busy/idle status with the LLM state.
     this.syncIdleStatus();
 
+    // Presence sweep: tombstone peers whose lease expired (dead processes).
+    const reaped = markStaleAgentsInactive(this.db, this.config.leaseTtlMs, this.sessionId);
+    for (const sessionId of reaped) {
+      const name = this.getAgentDisplayName(sessionId);
+      this.logEvent("recv", "lease_expired", name, null, null, false);
+      this.ctx.ui.notify(`"${name}" lease expired — marked inactive`, "warning");
+    }
+
     // Sync in-memory state with DB every poll cycle.
     this.refreshRosterStatuses();
   }
@@ -433,6 +461,9 @@ export class Mamoru {
     for (const [targetSessionId, retry] of this.pendingRetries) {
       const entry = this.roster.get(targetSessionId);
       if (!entry || entry.status !== "available") continue;
+      // A stale 'available' row is a dead process that has not been swept
+      // yet — retrying would hang forever (the old black-hole cousin).
+      if (!isLeaseAlive(this.db, targetSessionId, this.config.leaseTtlMs)) continue;
 
       // Agent is available — retry!
       const newTaskId = this.retryTask(retry);

@@ -40,6 +40,59 @@ export function updateHeartbeat(db: Database.Database, sessionId: string): void 
   db.prepare("UPDATE agents SET last_heartbeat = ? WHERE session_id = ?").run(Date.now(), sessionId);
 }
 
+// ── Presence Lease ───────────────────────────────────────────
+//
+// Historically last_heartbeat was only written when a ping was handled, so a
+// live session that received no pings looked exactly like a dead one. A lease
+// is renewed by an extension-level timer (no LLM involved): a session whose
+// process dies stops renewing within leaseTtlMs.
+
+/** Whether the session's presence lease is still fresh. */
+export function isLeaseAlive(
+  db: Database.Database,
+  sessionId: string,
+  ttlMs: number,
+  now: number = Date.now(),
+): boolean {
+  const row = db.prepare(
+    "SELECT last_heartbeat FROM agents WHERE session_id = ?",
+  ).get(sessionId) as { last_heartbeat: number | null } | undefined;
+  if (!row || row.last_heartbeat === null) return false;
+  return now - row.last_heartbeat <= ttlMs;
+}
+
+/**
+ * Mark every agent whose presence lease expired as 'inactive' (except
+ * `excludeSessionId`). Status-only tombstoning keeps the row for display
+ * (getAgentDisplayName) and future takeover, while removing it from
+ * getActiveAgents/roster. Returns the session ids marked.
+ */
+export function markStaleAgentsInactive(
+  db: Database.Database,
+  ttlMs: number,
+  excludeSessionId: string,
+  now: number = Date.now(),
+): string[] {
+  const stale = db.prepare(`
+    SELECT session_id FROM agents
+    WHERE session_id != ?
+      AND status != 'inactive'
+      AND (last_heartbeat IS NULL OR ? - last_heartbeat > ?)
+  `).all(excludeSessionId, now, ttlMs) as { session_id: string }[];
+
+  if (stale.length === 0) return [];
+
+  const mark = db.prepare(
+    "UPDATE agents SET status = 'inactive' WHERE session_id = ?",
+  );
+  const marked: string[] = [];
+  for (const row of stale) {
+    mark.run(row.session_id);
+    marked.push(row.session_id);
+  }
+  return marked;
+}
+
 export function getActiveAgents(db: Database.Database): AgentRow[] {
   return db.prepare("SELECT * FROM agents WHERE status != 'inactive'").all() as AgentRow[];
 }
