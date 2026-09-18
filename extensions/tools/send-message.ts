@@ -16,6 +16,7 @@ export const SendMessageParams = Type.Object({
   detail: Type.Optional(Type.String({ description: "Absolute file path to a detail markdown file in your teammate directory. REQUIRED for task_req — write a .md file containing full context, requirements, and absolute paths to any referenced files (images, screenshots, code). Also use for task_done/task_fail to include results." })),
   intent: Type.Optional(Type.String({ description: "Freeform intent hint" })),
   blocking: Type.Optional(Type.Boolean({ description: "For task_req only. If true, MAMORU auto-retries when rejected (waits for recipient to become available). If false (default), you are notified of the rejection and can retry manually when the recipient is available." })),
+  gate: Type.Optional(Type.String({ description: "For task_req only. Set to 'milestone' to make the requester pause receiving new messages after this task's task_done arrives, until a human runs /team-resume." })),
 });
 
 export type SendMessageInput = Static<typeof SendMessageParams>;
@@ -105,6 +106,7 @@ export function createSendMessageTool(opts: {
           intent: params.intent ?? null,
           need_reply: true,
           detail: params.detail ?? null,
+          gate: params.gate ?? null,
         });
 
         // sendTaskReq auto-sets task_id = message_id
@@ -121,6 +123,7 @@ export function createSendMessageTool(opts: {
           content: params.content,
           detail: params.detail ?? null,
           intent: params.intent ?? null,
+          gate: params.gate ?? null,
         });
         mamoru.logOutbound("task_req", target.agent_name, messageId, params.content);
 

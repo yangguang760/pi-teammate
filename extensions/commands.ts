@@ -362,6 +362,23 @@ export function registerCommands(
     },
   });
 
+  // ── /team-resume ────────────────────────────────────────────
+  pi.registerCommand("team-resume", {
+    description: "Lift the milestone gate: resume receiving messages after a gated task_done",
+    handler: async (_args, ctx) => {
+      const mamoru = getMamoru();
+      if (!mamoru) {
+        ctx.ui.notify("Not connected to any team channel.", "info");
+        return;
+      }
+      if (!mamoru.isGated()) {
+        ctx.ui.notify("Gate is not engaged — reception already active.", "info");
+        return;
+      }
+      mamoru.resume();
+    },
+  });
+
   // ── /team-status ────────────────────────────────────────────────
   pi.registerCommand("team-status", {
     description: "Show current team connection status",
@@ -379,6 +396,7 @@ export function registerCommands(
         `Channel: ${mamoru.getChannel()}`,
         `Agent: ${mamoru.getAgentName()} (${mamoru.getSessionId()})`,
         `Status: ${mamoru.getStatus()}`,
+        `Gate: ${mamoru.isGated() ? "ENGAGED (reception paused) — /team-resume to lift" : "off"}`,
         `Active Task: ${activeTask ? `#${activeTask.taskId} from ${activeTask.requesterSessionId} (started ${formatElapsed(Date.now() - activeTask.startedAt)} ago)` : "none"}`,
         `Outbound Tasks: ${outbound.size}`,
       ];

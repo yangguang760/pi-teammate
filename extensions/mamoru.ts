@@ -5,6 +5,8 @@
  * manages agent status and the in-memory roster, and tracks outbound tasks.
  */
 import type Database from "better-sqlite3";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join as joinPath } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
   MessageRow,
@@ -19,6 +21,7 @@ import type {
 } from "./types.ts";
 import { parsePayload, createPayload, isNewTaskReq, MAX_CONTENT_WORDS } from "./types.ts";
 import { sendTaskReq } from "./db.ts";
+import { getChannelDir } from "./paths.ts";
 import {
   sendMessage,
   getUnreadMessages,
@@ -89,6 +92,8 @@ export class Mamoru {
   private eventLog: MamoruEventLog[] = [];
   private pendingRetries: Map<string, PendingRetry> = new Map(); // keyed by targetSessionId
   private parkedRequeues: Map<number, ParkedRequeue> = new Map(); // keyed by taskId
+  private gated: boolean = false; // milestone gate: reception paused until /team-resume
+  private hivePath: string | null = null; // JSONL audit file
   private previousSessionIds: string[] = []; // sessions this identity took over (black-hole fix)
 
   constructor(opts: {
@@ -144,6 +149,15 @@ export class Mamoru {
 
     // Init cursor (keeps a position inherited by the takeover)
     initCursor(this.db, this.sessionId, this.channel);
+
+    // JSONL audit trail: one append-only file per identity per channel.
+    try {
+      const hiveDir = joinPath(getChannelDir(this.channel), "hive");
+      mkdirSync(hiveDir, { recursive: true });
+      this.hivePath = joinPath(hiveDir, `events-${this.agentName}.jsonl`);
+    } catch {
+      this.hivePath = null; // audit unavailable — guardian must keep running
+    }
 
     // Load roster from DB (excludes self)
     this.roster.initFromDb(this.db, this.sessionId);
@@ -273,11 +287,37 @@ export class Mamoru {
     this.eventLog = [];
   }
 
+  /** Milestone gate state (transport-level reception pause). */
+  isGated(): boolean {
+    return this.gated;
+  }
+
+  /**
+   * Engage the milestone gate: hold all inbound LLM-bound traffic.
+   * Public: /team-resume needs resume(); tests and tools may engage directly.
+   */
+  engageGate(taskId: number | null, fromName: string | null): void {
+    this.gated = true;
+    this.logEvent("recv", "gated", fromName, taskId, null, false);
+    this.ctx.ui.notify(
+      `milestone gate: task #${taskId ?? "?"} delivered — reception paused. /team-resume to continue.`,
+      "warning",
+    );
+  }
+
+  /** Lift the milestone gate (/team-resume). Held messages flow on next poll. */
+  resume(): void {
+    if (!this.gated) return;
+    this.gated = false;
+    this.logEvent("recv", "resumed", null, null, null, false);
+    this.ctx.ui.notify("gate lifted — reception resumed", "info");
+  }
+
   /** Register an outbound task for timeout tracking. */
   registerOutboundTask(
     taskId: number,
     workerSessionId: string,
-    meta?: { content: string; detail: string | null; intent: string | null },
+    meta?: { content: string; detail: string | null; intent: string | null; gate?: string | null },
   ): void {
     this.outboundTasks.set(taskId, {
       taskId,
@@ -288,6 +328,7 @@ export class Mamoru {
       content: meta?.content,
       detail: meta?.detail,
       intent: meta?.intent,
+      gate: meta?.gate ?? null,
       requeueAttempts: 0,
     });
   }
@@ -304,6 +345,7 @@ export class Mamoru {
         intent: retry.intent,
         need_reply: true,
         detail: retry.detail,
+        gate: (retry as PendingRetry & { gate?: string | null }).gate ?? null,
       });
 
       const messageId = sendTaskReq(this.db, {
@@ -318,6 +360,7 @@ export class Mamoru {
         content: retry.content,
         detail: retry.detail,
         intent: retry.intent,
+        gate: (retry as PendingRetry & { gate?: string | null }).gate ?? null,
       });
 
       const targetName = this.getAgentDisplayName(retry.targetSessionId);
@@ -412,6 +455,21 @@ export class Mamoru {
 
   /** Execute one poll cycle. Public for testability. */
   pollOnce(): void {
+    // Milestone gate engaged: hold ALL inbound traffic — messages stay unread
+    // in the DB and flow after /team-resume (or after a crash+rejoin, thanks
+    // to the takeover replay). Maintenance (sweep, retries, watchdog) runs.
+    if (this.gated) {
+      this.syncIdleStatus();
+      const reaped = markStaleAgentsInactive(this.db, this.config.leaseTtlMs, this.sessionId);
+      for (const sessionId of reaped) {
+        this.ctx.ui.notify(`"${this.getAgentDisplayName(sessionId)}" lease expired — marked inactive`, "warning");
+      }
+      this.watchdogRequeue();
+      this.processParkedRequeues();
+      this.refreshRosterStatuses();
+      return;
+    }
+
     const messages = getUnreadMessages(this.db, this.sessionId, this.channel, this.previousSessionIds);
 
     if (messages.length > 0) {
@@ -470,6 +528,7 @@ export class Mamoru {
         content: task.content,
         detail: task.detail ?? null,
         intent: task.intent ?? null,
+        gate: task.gate ?? null,
         attempts: task.requeueAttempts ?? 0,
         parkedAt: Date.now(),
       });
@@ -503,14 +562,18 @@ export class Mamoru {
           content: parked.content,
           detail: parked.detail,
           intent: parked.intent,
+          gate: parked.gate,
           blocking: false,
           retryCount: parked.attempts,
           createdAt: parked.parkedAt,
-        });
+        } as PendingRetry & { gate?: string | null });
         if (newTaskId === null) continue; // transient send failure — try again next poll
 
         const t = this.outboundTasks.get(newTaskId);
-        if (t) t.requeueAttempts = parked.attempts + 1;
+        if (t) {
+          t.requeueAttempts = parked.attempts + 1;
+          t.gate = parked.gate;
+        }
         this.parkedRequeues.delete(taskId);
 
         const candName = this.getAgentDisplayName(candidate.session_id);
@@ -733,13 +796,20 @@ export class Mamoru {
         this.forwardToLlm(msg, payload);
         break;
 
-      case "task_done":
+      case "task_done": {
         this.logEvent("recv", "task_done", fromName, msg.task_id, payload.content, true);
+        const trackedTask = msg.task_id ? this.outboundTasks.get(msg.task_id) : undefined;
         if (msg.task_id) {
           this.outboundTasks.delete(msg.task_id);
         }
         this.forwardToLlm(msg, payload);
+        // Milestone gate: the requester pauses reception after a milestone
+        // delivery — a human decides when to continue (/team-resume).
+        if (trackedTask?.gate === "milestone") {
+          this.engageGate(msg.task_id ?? null, fromName);
+        }
         break;
+      }
 
       case "task_fail":
         this.logEvent("recv", "task_fail", fromName, msg.task_id, payload.content, true);
@@ -852,6 +922,18 @@ export class Mamoru {
       forwardedToLlm,
     };
     this.eventLog.push(entry);
+
+    // JSONL audit trail — append-only, one file per identity per channel.
+    if (this.hivePath) {
+      try {
+        appendFileSync(
+          this.hivePath,
+          JSON.stringify({ ...entry, agentName: this.agentName, sessionId: this.sessionId }) + "\n",
+        );
+      } catch {
+        // audit must never break the guardian
+      }
+    }
 
     // Emit event so other extensions (e.g. TTS harness) can react immediately
     this.pi.events.emit("teammate_message", {

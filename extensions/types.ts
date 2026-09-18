@@ -53,6 +53,7 @@ export interface MessagePayload {
   need_reply: boolean;
   content: string; // max 20 words
   detail: string | null; // absolute file path or null
+  gate?: string | null; // "milestone": requester pauses reception after task_done
 }
 
 export const MAX_CONTENT_WORDS = 20;
@@ -144,6 +145,7 @@ export interface OutboundTask {
   content?: string;
   detail?: string | null;
   intent?: string | null;
+  gate?: string | null; // "milestone": pause reception when this task's task_done arrives
   requeueAttempts?: number;
 }
 
@@ -154,6 +156,7 @@ export interface ParkedRequeue {
   content: string;
   detail: string | null;
   intent: string | null;
+  gate: string | null;
   attempts: number;
   parkedAt: number;
 }
@@ -198,7 +201,7 @@ export function parsePayload(raw: string): MessagePayload | null {
 export function createPayload(
   event: MessageEvent,
   content: string,
-  options?: { intent?: string | null; need_reply?: boolean; detail?: string | null },
+  options?: { intent?: string | null; need_reply?: boolean; detail?: string | null; gate?: string | null },
 ): MessagePayload {
   return {
     event,
@@ -206,5 +209,6 @@ export function createPayload(
     need_reply: options?.need_reply ?? false,
     content,
     detail: options?.detail ?? null,
+    ...(options?.gate ? { gate: options.gate } : {}),
   };
 }
