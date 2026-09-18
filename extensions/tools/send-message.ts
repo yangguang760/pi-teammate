@@ -116,8 +116,12 @@ export function createSendMessageTool(opts: {
           maxContentWords: wordLimit,
         });
 
-        // Register outbound task for timeout tracking
-        mamoru.registerOutboundTask(messageId, params.to);
+        // Register outbound task for timeout tracking (with watchdog metadata)
+        mamoru.registerOutboundTask(messageId, params.to, {
+          content: params.content,
+          detail: params.detail ?? null,
+          intent: params.intent ?? null,
+        });
         mamoru.logOutbound("task_req", target.agent_name, messageId, params.content);
 
         // Register pending retry if blocking/non-blocking retry is requested

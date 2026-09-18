@@ -13,6 +13,7 @@ import type {
   AgentStatus,
   ActiveTask,
   OutboundTask,
+  ParkedRequeue,
   PendingRetry,
   PersonaConfig,
 } from "./types.ts";
@@ -87,6 +88,7 @@ export class Mamoru {
   private contextBuffer: string[] = []; // buffered broadcast/info messages
   private eventLog: MamoruEventLog[] = [];
   private pendingRetries: Map<string, PendingRetry> = new Map(); // keyed by targetSessionId
+  private parkedRequeues: Map<number, ParkedRequeue> = new Map(); // keyed by taskId
   private previousSessionIds: string[] = []; // sessions this identity took over (black-hole fix)
 
   constructor(opts: {
@@ -272,13 +274,21 @@ export class Mamoru {
   }
 
   /** Register an outbound task for timeout tracking. */
-  registerOutboundTask(taskId: number, workerSessionId: string): void {
+  registerOutboundTask(
+    taskId: number,
+    workerSessionId: string,
+    meta?: { content: string; detail: string | null; intent: string | null },
+  ): void {
     this.outboundTasks.set(taskId, {
       taskId,
       workerSessionId,
       sentAt: Date.now(),
       lastEventAt: Date.now(),
       timeoutTimer: null,
+      content: meta?.content,
+      detail: meta?.detail,
+      intent: meta?.intent,
+      requeueAttempts: 0,
     });
   }
 
@@ -304,7 +314,11 @@ export class Mamoru {
         maxContentWords: this.getContentWordLimit(),
       });
 
-      this.registerOutboundTask(messageId, retry.targetSessionId);
+      this.registerOutboundTask(messageId, retry.targetSessionId, {
+        content: retry.content,
+        detail: retry.detail,
+        intent: retry.intent,
+      });
 
       const targetName = this.getAgentDisplayName(retry.targetSessionId);
       this.logEvent("sent", "task_req", targetName, messageId, retry.content, false);
@@ -429,8 +443,96 @@ export class Mamoru {
       this.ctx.ui.notify(`"${name}" lease expired — marked inactive`, "warning");
     }
 
+    // Outbound watchdog: a worker that died mid-task must not hold its task
+    // until the legacy timeout — requeue it to a live teammate fast.
+    this.watchdogRequeue();
+    this.processParkedRequeues();
+
     // Sync in-memory state with DB every poll cycle.
     this.refreshRosterStatuses();
+  }
+
+  /**
+   * Outbound watchdog, pass 1: detect workers whose lease died mid-task and
+   * park their tasks for fast requeue. Tasks without watchdog metadata
+   * (registered before this feature) are left to the legacy timeout.
+   */
+  private watchdogRequeue(): void {
+    for (const [taskId, task] of [...this.outboundTasks]) {
+      if (task.content === undefined) continue;
+      if (isLeaseAlive(this.db, task.workerSessionId, this.config.leaseTtlMs)) continue;
+
+      if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
+      this.outboundTasks.delete(taskId);
+      this.parkedRequeues.set(taskId, {
+        taskId,
+        deadWorkerSessionId: task.workerSessionId,
+        content: task.content,
+        detail: task.detail ?? null,
+        intent: task.intent ?? null,
+        attempts: task.requeueAttempts ?? 0,
+        parkedAt: Date.now(),
+      });
+      const deadName = this.getAgentDisplayName(task.workerSessionId);
+      this.logEvent("recv", "watchdog_parked", deadName, taskId, task.content, false);
+      this.ctx.ui.notify(
+        `watchdog: "${deadName}" died holding task #${taskId} — looking for a live teammate`,
+        "warning",
+      );
+    }
+  }
+
+  /**
+   * Outbound watchdog, pass 2: re-park parked tasks to a live teammate.
+   * Dead-letters after maxRequeueAttempts resends or after 4 lease TTLs
+   * without any candidate ever appearing.
+   */
+  private processParkedRequeues(): void {
+    for (const [taskId, parked] of [...this.parkedRequeues]) {
+      const candidates = this.roster.getAll()
+        .filter((e) =>
+          e.session_id !== parked.deadWorkerSessionId &&
+          e.session_id !== this.sessionId &&
+          e.status === "available" &&
+          isLeaseAlive(this.db, e.session_id, this.config.leaseTtlMs));
+
+      if (candidates.length > 0) {
+        const candidate = candidates[0]!;
+        const newTaskId = this.retryTask({
+          targetSessionId: candidate.session_id,
+          content: parked.content,
+          detail: parked.detail,
+          intent: parked.intent,
+          blocking: false,
+          retryCount: parked.attempts,
+          createdAt: parked.parkedAt,
+        });
+        if (newTaskId === null) continue; // transient send failure — try again next poll
+
+        const t = this.outboundTasks.get(newTaskId);
+        if (t) t.requeueAttempts = parked.attempts + 1;
+        this.parkedRequeues.delete(taskId);
+
+        const candName = this.getAgentDisplayName(candidate.session_id);
+        const deadName = this.getAgentDisplayName(parked.deadWorkerSessionId);
+        this.logEvent("sent", "watchdog_requeue", candName, newTaskId, parked.content, false);
+        this.ctx.ui.notify(
+          `watchdog: task #${taskId} requeued from dead "${deadName}" to "${candName}" as task #${newTaskId}`,
+          "info",
+        );
+        continue;
+      }
+
+      const timedOutWaiting = Date.now() - parked.parkedAt > this.config.leaseTtlMs * 4;
+      if (parked.attempts >= this.config.maxRequeueAttempts || timedOutWaiting) {
+        this.parkedRequeues.delete(taskId);
+        this.logEvent("recv", "watchdog_dead_letter", null, taskId, parked.content, false);
+        this.ctx.ui.notify(
+          `watchdog: task #${taskId} dead-lettered — no live teammate could take it (${parked.attempts} requeues)`,
+          "error",
+        );
+      }
+    }
   }
 
   /** Re-read agent statuses from the DB and update roster entries. */

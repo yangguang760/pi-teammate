@@ -121,6 +121,7 @@ export interface MamoruConfig {
   pingTimeoutSeconds: number; // default 20
   leaseRenewalMs: number; // default 2000 — presence lease renewal interval (extension timer, no LLM)
   leaseTtlMs: number; // default 30000 — lease considered expired after this long without renewal
+  maxRequeueAttempts: number; // default 3 — watchdog requeues a dead worker's task at most this many times
 }
 
 export const DEFAULT_MAMORU_CONFIG: MamoruConfig = {
@@ -129,6 +130,7 @@ export const DEFAULT_MAMORU_CONFIG: MamoruConfig = {
   pingTimeoutSeconds: 20,
   leaseRenewalMs: 2000,
   leaseTtlMs: 30_000,
+  maxRequeueAttempts: 3,
 };
 
 // ── Outbound Task Tracking (requester side) ─────────────────────
@@ -138,6 +140,22 @@ export interface OutboundTask {
   sentAt: number;
   lastEventAt: number;
   timeoutTimer: ReturnType<typeof setTimeout> | null;
+  // Watchdog metadata — present when the task may be requeued on worker death.
+  content?: string;
+  detail?: string | null;
+  intent?: string | null;
+  requeueAttempts?: number;
+}
+
+/** A task whose worker died, waiting for a live teammate to requeue to. */
+export interface ParkedRequeue {
+  taskId: number;
+  deadWorkerSessionId: string;
+  content: string;
+  detail: string | null;
+  intent: string | null;
+  attempts: number;
+  parkedAt: number;
 }
 
 // ── Pending Retry (rejected task_req awaiting retry) ────────────
