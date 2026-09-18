@@ -192,6 +192,7 @@ export function getUnreadMessages(
   db: Database.Database,
   sessionId: string,
   channel: string,
+  excludeFrom: string[] = [],
 ): MessageRow[] {
   // Get the cursor position
   const cursor = db.prepare(
@@ -200,14 +201,91 @@ export function getUnreadMessages(
 
   const lastReadId = cursor?.last_read_id ?? 0;
 
+  // Sessions this identity previously inhabited (see takeoverIdentity).
+  // Broadcasts we sent from those sessions must not replay to ourselves.
+  const excludes = excludeFrom.filter(Boolean);
+  const excludeClause = excludes.length > 0
+    ? `AND from_agent NOT IN (${excludes.map(() => "?").join(", ")})`
+    : "";
+
   return db.prepare(`
     SELECT * FROM messages
     WHERE channel = ?
       AND message_id > ?
       AND from_agent != ?
+      ${excludeClause}
       AND (to_agent IS NULL OR to_agent = ?)
     ORDER BY message_id ASC
-  `).all(channel, lastReadId, sessionId, sessionId) as MessageRow[];
+  `).all(channel, lastReadId, sessionId, ...excludes, sessionId) as MessageRow[];
+}
+
+// ── Identity Takeover ─────────────────────────────────────────
+
+export interface TakeoverResult {
+  /** Old session row this registration reclaimed, if any. */
+  previousSessionId: string | null;
+}
+
+/**
+ * Reclaim the identity `agentName` for a (new) session.
+ *
+ * Historically a teammate's delivery identity was bound to its session_id:
+ * when the process died and the user opened a NEW session, the old agents row
+ * stayed behind as a zombie and initCursor skipped to MAX(message_id),
+ * permanently skipping every message sent while the teammate was down —
+ * the "black hole".
+ *
+ * This function re-binds the identity to the incoming session:
+ *   1. redirect messages addressed to the old session to the new one,
+ *   2. copy the old cursor position so unread messages (including everything
+ *      sent during downtime) replay, instead of being skipped,
+ *   3. delete the old (zombie) row.
+ *
+ * Must be called AFTER registerAgent (so the new session's agents row exists
+ * for the cursor foreign key) and BEFORE initCursor (whose ON CONFLICT DO
+ * NOTHING then keeps the inherited position).
+ *
+ * Takeover is unconditional in this version: a precise liveness guard
+ * ("refuse to take over a session that is still alive") arrives with
+ * presence leases.
+ */
+export function takeoverIdentity(
+  db: Database.Database,
+  agentName: string,
+  newSessionId: string,
+): TakeoverResult {
+  const old = getAgentByName(db, agentName);
+  if (!old || old.session_id === newSessionId) {
+    return { previousSessionId: null };
+  }
+
+  const previousSessionId = old.session_id;
+
+  // 1. Re-address messages that were sent to the old session.
+  //    (Safe under foreign keys: messages.to_agent is not a foreign key.)
+  db.prepare("UPDATE messages SET to_agent = ? WHERE to_agent = ?")
+    .run(newSessionId, previousSessionId);
+
+  // 2. Inherit cursor positions (per channel). If this exact session already
+  //    has a cursor (reconnect), keep the newer one. The new session's agents
+  //    row must already exist (registerAgent ran first) for the FK to hold.
+  const cursors = db.prepare(
+    "SELECT channel, last_read_id FROM agent_cursors WHERE session_id = ?",
+  ).all(previousSessionId) as { channel: string; last_read_id: number }[];
+
+  const insertCursor = db.prepare(`
+    INSERT INTO agent_cursors (session_id, channel, last_read_id)
+    VALUES (?, ?, ?)
+    ON CONFLICT DO NOTHING
+  `);
+  for (const c of cursors) {
+    insertCursor.run(newSessionId, c.channel, c.last_read_id);
+  }
+
+  // 3. Remove the zombie row (also drops its now-duplicated cursor rows).
+  deleteAgent(db, previousSessionId);
+
+  return { previousSessionId };
 }
 
 export function getMessagesByTaskId(db: Database.Database, taskId: number): MessageRow[] {

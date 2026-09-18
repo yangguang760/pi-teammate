@@ -27,6 +27,7 @@ import {
   registerAgent,
   getAgentBySession,
   initCursor,
+  takeoverIdentity,
 } from "./db.ts";
 import { Roster } from "./roster.ts";
 
@@ -83,6 +84,7 @@ export class Mamoru {
   private contextBuffer: string[] = []; // buffered broadcast/info messages
   private eventLog: MamoruEventLog[] = [];
   private pendingRetries: Map<string, PendingRetry> = new Map(); // keyed by targetSessionId
+  private previousSessionIds: string[] = []; // sessions this identity took over (black-hole fix)
 
   constructor(opts: {
     db: Database.Database;
@@ -122,7 +124,20 @@ export class Mamoru {
       cwd: this.ctx.cwd ?? null,
     });
 
-    // Init cursor
+    // Reclaim our identity from any previous session of the same agent name.
+    // Re-addresses messages that targeted the dead session and copies its
+    // cursor (so downtime messages replay instead of being skipped), then
+    // removes the zombie row. No-op for first joins and same-session
+    // reconnects. (Runs after registerAgent — takeoverIdentity documents why.)
+    const takeover = takeoverIdentity(this.db, this.agentName, this.sessionId);
+    if (takeover.previousSessionId) {
+      this.previousSessionIds.push(takeover.previousSessionId);
+      console.log(
+        `[teammate] Took over identity "${this.agentName}" from previous session ${takeover.previousSessionId}; unread messages will replay.`,
+      );
+    }
+
+    // Init cursor (keeps a position inherited by the takeover)
     initCursor(this.db, this.sessionId, this.channel);
 
     // Load roster from DB (excludes self)
@@ -207,6 +222,11 @@ export class Mamoru {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** Session ids this identity took over from (for message filtering/tests). */
+  getPreviousSessionIds(): string[] {
+    return [...this.previousSessionIds];
   }
 
   /** Get this agent's detail directory for storing task output files. */
@@ -358,7 +378,7 @@ export class Mamoru {
 
   /** Execute one poll cycle. Public for testability. */
   pollOnce(): void {
-    const messages = getUnreadMessages(this.db, this.sessionId, this.channel);
+    const messages = getUnreadMessages(this.db, this.sessionId, this.channel, this.previousSessionIds);
 
     if (messages.length > 0) {
       let lastId = 0;
