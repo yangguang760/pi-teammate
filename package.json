@@ -1,13 +1,19 @@
 {
-  "name": "pi-teammate",
-  "version": "0.5.0",
-  "description": "Pi agent-to-agent team communication via shared SQLite message bus with MAMORU guardian",
+  "name": "@yangguang760/pi-teammate",
+  "version": "0.6.0",
+  "description": "Pi agent-to-agent team communication via shared SQLite message bus with MAMORU guardian — fork of pi-teammate with identity-takeover rejoin fix, presence leases, and an outbound watchdog",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ross-jill-ws/pi-teammate.git"
+    "url": "git+https://github.com/yangguang760/pi-teammate.git"
   },
   "author": "Ross Z",
+  "contributors": [
+    "yangguang760 (identity takeover, presence lease, watchdog, milestone gate)"
+  ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "pi-package",
     "teammate",
@@ -21,7 +27,8 @@
     "documents",
     "skills",
     "package.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun test",
@@ -48,6 +55,6 @@
     "skills": [
       "skills"
     ],
-    "image": "https://github.com/ross-jill-ws/pi-teammate/blob/main/documents/20260405115019.png?raw=true"
+    "image": "https://github.com/yangguang760/pi-teammate/blob/main/documents/20260405115019.png?raw=true"
   }
 }

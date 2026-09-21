@@ -1,3 +1,10 @@
+> **Fork notice (@yangguang760/pi-teammate v0.6.0):** this is a maintained fork of
+> [ross-jill-ws/pi-teammate](https://github.com/ross-jill-ws/pi-teammate) (MIT).
+> Divergences: crash-safe identity takeover (rejoin no longer loses downtime
+> messages), presence leases with stale-peer sweep, outbound task watchdog with
+> requeue/dead-letter, optional milestone gates with /team-resume, JSONL audit
+> trail. See LICENSE for attribution.
+
 # pi-teammate
 
 A `pi` extension that turns multiple `pi` sessions into a collaborative team of AI agents. Instead of a top-down orchestrator dispatching tasks to subordinate subagents, `pi-teammate` creates a **peer network** where every agent is equal, can communicate with any other agent, and retains context across tasks.
