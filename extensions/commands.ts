@@ -147,7 +147,15 @@ export function registerCommands(
   setMamoru: (m: Mamoru | null) => void,
   getCtx: () => ExtensionContext | null,
   opts: {
-    bootstrapMamoru: (ctx: ExtensionContext, channel: string, agentName: string, persona: import("./persona.ts").PersonaConfig | null) => void;
+    bootstrapMamoru: (ctx: ExtensionContext, channel: string, agentName: string, persona: import("./persona.ts").PersonaConfig | null, forceNew?: boolean) => void;
+    /** M2 multi-channel surface: per-channel instances and teardown. */
+    multi: {
+      has: (channel: string) => boolean;
+      leave: (channel: string) => boolean;
+      leaveAll: () => void;
+      all: () => { channel: string; mamoru: Mamoru; db: unknown }[];
+      primary: () => { channel: string; mamoru: Mamoru; db: unknown } | null;
+    };
   },
 ): { hintRegistry: Map<string, UsageHint> } {
   // Per-registration registry of slash-command usage hints. Built up below
@@ -228,11 +236,10 @@ export function registerCommands(
         agentName = joinPersona ? channelIdentity(joinPersona) : ctx.sessionManager.getSessionId();
       }
 
-      // Check if already joined
-      const existing = getMamoru();
-      if (existing) {
+      // Check if already joined (per channel — M2 allows N channels per session)
+      if (opts.multi.has(channel)) {
         ctx.ui.notify(
-          `Already joined "${existing.getChannel()}" as "${existing.getAgentName()}". Use /team-leave first.`,
+          `Already joined "${channel}". Use /team-leave ${channel} first.`,
           "warning",
         );
         return;
@@ -254,19 +261,35 @@ export function registerCommands(
         summary: "Usage: /team-leave (no arguments)",
         examples: [],
       })),
-    handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+    handler: async (args, ctx) => {
+      const arg = args.trim();
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "warning");
         return;
       }
 
-      const channel = mamoru.getChannel();
-      const name = mamoru.getAgentName();
-      mamoru.stop();
-      setMamoru(null);
-      ctx.ui.setStatus("teammate", "mamoru: inactive");
-      ctx.ui.notify(`Left channel "${channel}" (was "${name}")`, "info");
+      if (arg === "all") {
+        opts.multi.leaveAll();
+        ctx.ui.setStatus("teammate", "mamoru: inactive");
+        ctx.ui.notify("Left all channels.", "info");
+        return;
+      }
+
+      // No argument leaves the primary channel; an argument names one.
+      const target = arg || opts.multi.primary()?.channel;
+      if (!target || !opts.multi.has(target)) {
+        ctx.ui.notify(
+          `Not joined to "${target ?? "(none)"}". Joined: ${joined.map((j) => j.channel).join(", ")}.`,
+          "warning",
+        );
+        return;
+      }
+      const rt = joined.find((j) => j.channel === target)!;
+      const name = rt.mamoru.getAgentName();
+      opts.multi.leave(target);
+      if (opts.multi.all().length === 0) ctx.ui.setStatus("teammate", "mamoru: inactive");
+      ctx.ui.notify(`Left channel "${target}" (was "${name}")`, "info");
     },
   });
 
@@ -365,17 +388,19 @@ export function registerCommands(
   // ── /team-resume ────────────────────────────────────────────
   pi.registerCommand("team-resume", {
     description: "Lift the milestone gate: resume receiving messages after a gated task_done",
-    handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+    handler: async (args, ctx) => {
+      const arg = args.trim();
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "info");
         return;
       }
-      if (!mamoru.isGated()) {
+      const targets = joined.filter((j) => j.mamoru.isGated() && (!arg || j.channel === arg));
+      if (targets.length === 0) {
         ctx.ui.notify("Gate is not engaged — reception already active.", "info");
         return;
       }
-      mamoru.resume();
+      for (const j of targets) j.mamoru.resume();
     },
   });
 
@@ -383,25 +408,27 @@ export function registerCommands(
   pi.registerCommand("team-status", {
     description: "Show current team connection status",
     handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "info");
         return;
       }
 
-      const activeTask = mamoru.getActiveTask();
-      const outbound = mamoru.getOutboundTasks();
+      const blocks = joined.map((j) => {
+        const mamoru = j.mamoru;
+        const activeTask = mamoru.getActiveTask();
+        const outbound = mamoru.getOutboundTasks();
+        return [
+          `[${j.channel}]`,
+          `Agent: ${mamoru.getAgentName()} (${mamoru.getSessionId()})`,
+          `Status: ${mamoru.getStatus()}`,
+          `Gate: ${mamoru.isGated() ? "ENGAGED (reception paused) — /team-resume to lift" : "off"}`,
+          `Active Task: ${activeTask ? `#${activeTask.taskId} from ${activeTask.requesterSessionId} (started ${formatElapsed(Date.now() - activeTask.startedAt)} ago)` : "none"}`,
+          `Outbound Tasks: ${outbound.size}`,
+        ].join("\n");
+      });
 
-      const lines = [
-        `Channel: ${mamoru.getChannel()}`,
-        `Agent: ${mamoru.getAgentName()} (${mamoru.getSessionId()})`,
-        `Status: ${mamoru.getStatus()}`,
-        `Gate: ${mamoru.isGated() ? "ENGAGED (reception paused) — /team-resume to lift" : "off"}`,
-        `Active Task: ${activeTask ? `#${activeTask.taskId} from ${activeTask.requesterSessionId} (started ${formatElapsed(Date.now() - activeTask.startedAt)} ago)` : "none"}`,
-        `Outbound Tasks: ${outbound.size}`,
-      ];
-
-      ctx.ui.notify(lines.join("\n"), "info");
+      ctx.ui.notify(blocks.join("\n\n"), "info");
     },
   });
 
@@ -409,26 +436,28 @@ export function registerCommands(
   pi.registerCommand("team-roster", {
     description: "Show all agents in the roster",
     handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "error");
         return;
       }
 
-      const roster = mamoru.getRoster();
-      const entries = roster.getAll();
+      const blocks: string[] = [];
+      let total = 0;
+      for (const j of joined) {
+        const entries = j.mamoru.getRoster().getAll();
+        total += entries.length;
+        const lines = entries.map(
+          (e) => `  ${e.agent_name} (${e.session_id}) — ${e.status} — ${e.description || "(no description)"}`,
+        );
+        blocks.push(`[${j.channel}]${entries.length > 0 ? `\n${lines.join("\n")}` : "\n  (no other agents online)"}`);
+      }
 
-      if (entries.length === 0) {
+      if (total === 0) {
         ctx.ui.notify("Roster is empty (no other agents online).", "info");
         return;
       }
-
-      const lines = entries.map(
-        (e) =>
-          `  ${e.agent_name} (${e.session_id}) — ${e.status} — ${e.description || "(no description)"}`,
-      );
-
-      ctx.ui.notify(`Roster (${entries.length} agents):\n${lines.join("\n")}`, "info");
+      ctx.ui.notify(`Roster (${total} agents):\n${blocks.join("\n")}`, "info");
     },
   });
 
@@ -490,37 +519,37 @@ export function registerCommands(
   pi.registerCommand("task-status", {
     description: "Show active inbound task and outbound tasks with elapsed time",
     handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "error");
         return;
       }
 
       const now = Date.now();
-      const activeTask = mamoru.getActiveTask();
-      const outbound = mamoru.getOutboundTasks();
-
-      const lines: string[] = [];
-
-      if (activeTask) {
-        lines.push(`Active (inbound) task #${activeTask.taskId}`);
-        lines.push(`  From: ${activeTask.requesterSessionId}`);
-        lines.push(`  Started: ${formatElapsed(now - activeTask.startedAt)} ago`);
-      } else {
-        lines.push("No active inbound task.");
-      }
-
-      if (outbound.size > 0) {
-        lines.push("");
-        lines.push(`Outbound tasks (${outbound.size}):`);
-        for (const [taskId, task] of outbound) {
-          lines.push(`  #${taskId} → ${task.workerSessionId} (sent ${formatElapsed(now - task.sentAt)} ago, last event ${formatElapsed(now - task.lastEventAt)} ago)`);
+      const blocks = joined.map((j) => {
+        const mamoru = j.mamoru;
+        const activeTask = mamoru.getActiveTask();
+        const outbound = mamoru.getOutboundTasks();
+        const lines: string[] = [`[${j.channel}]`];
+        if (activeTask) {
+          lines.push(`Active (inbound) task #${activeTask.taskId}`);
+          lines.push(`  From: ${activeTask.requesterSessionId}`);
+          lines.push(`  Started: ${formatElapsed(now - activeTask.startedAt)} ago`);
+        } else {
+          lines.push("No active inbound task.");
         }
-      } else {
-        lines.push("No outbound tasks.");
-      }
+        if (outbound.size > 0) {
+          lines.push(`Outbound tasks (${outbound.size}):`);
+          for (const [taskId, task] of outbound) {
+            lines.push(`  #${taskId} → ${task.workerSessionId} (sent ${formatElapsed(now - task.sentAt)} ago, last event ${formatElapsed(now - task.lastEventAt)} ago)`);
+          }
+        } else {
+          lines.push("No outbound tasks.");
+        }
+        return lines.join("\n");
+      });
 
-      ctx.ui.notify(lines.join("\n"), "info");
+      ctx.ui.notify(blocks.join("\n\n"), "info");
     },
   });
 
@@ -528,42 +557,45 @@ export function registerCommands(
   pi.registerCommand("task-list", {
     description: "List all task_req messages on the channel",
     handler: async (_args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "error");
         return;
       }
 
-      const channel = mamoru.getChannel();
-
       const Database = (await import("better-sqlite3")).default;
-      const dbPath = getDbPath(channel);
-      const db = new Database(dbPath, { readonly: true });
+      const blocks: string[] = [];
+      let total = 0;
+      for (const j of joined) {
+        const db = new Database(getDbPath(j.channel), { readonly: true });
+        try {
+          // task_req messages where task_id = message_id (i.e., new task requests)
+          const rows = db
+            .prepare(
+              "SELECT * FROM messages WHERE channel = ? AND task_id = message_id ORDER BY message_id DESC",
+            )
+            .all(j.channel) as MessageRow[];
 
-      try {
-        // task_req messages where task_id = message_id (i.e., new task requests)
-        const rows = db
-          .prepare(
-            "SELECT * FROM messages WHERE channel = ? AND task_id = message_id ORDER BY message_id DESC",
-          )
-          .all(channel) as MessageRow[];
+          if (rows.length === 0) continue;
 
-        if (rows.length === 0) {
-          ctx.ui.notify("No tasks found.", "info");
-          return;
+          const lines = rows.map((row) => {
+            const payload = parsePayload(row.payload);
+            const content = payload?.content ?? "(unparseable)";
+            const to = row.to_agent ? ` → ${row.to_agent}` : " (broadcast)";
+            return `Task #${row.message_id} [${formatTimestamp(row.created_at)}] ${row.from_agent}${to}: ${content}`;
+          });
+          total += rows.length;
+          blocks.push(`[${j.channel}]\n${lines.join("\n")}`);
+        } finally {
+          db.close();
         }
-
-        const lines = rows.map((row) => {
-          const payload = parsePayload(row.payload);
-          const content = payload?.content ?? "(unparseable)";
-          const to = row.to_agent ? ` → ${row.to_agent}` : " (broadcast)";
-          return `Task #${row.message_id} [${formatTimestamp(row.created_at)}] ${row.from_agent}${to}: ${content}`;
-        });
-
-        ctx.ui.notify(`Tasks (${rows.length}):\n${lines.join("\n")}`, "info");
-      } finally {
-        db.close();
       }
+
+      if (total === 0) {
+        ctx.ui.notify("No tasks found.", "info");
+        return;
+      }
+      ctx.ui.notify(`Tasks (${total}):\n${blocks.join("\n")}`, "info");
     },
   });
 
@@ -577,8 +609,8 @@ export function registerCommands(
         ],
       })),
     handler: async (args, ctx) => {
-      const mamoru = getMamoru();
-      if (!mamoru) {
+      const joined = opts.multi.all();
+      if (joined.length === 0) {
         ctx.ui.notify("Not connected to any team channel.", "error");
         return;
       }
@@ -589,12 +621,15 @@ export function registerCommands(
         return;
       }
 
-      const outbound = mamoru.getOutboundTasks();
-      const task = outbound.get(taskId);
-      if (!task) {
-        ctx.ui.notify(`No outbound task #${taskId} found.`, "warning");
+      // Task ids are per-channel message ids — search every joined channel.
+      const hit = joined.find((j) => j.mamoru.getOutboundTasks().has(taskId));
+      if (!hit) {
+        ctx.ui.notify(`No outbound task #${taskId} found on any joined channel.`, "warning");
         return;
       }
+
+      const mamoru = hit.mamoru;
+      const task = mamoru.getOutboundTasks().get(taskId)!;
 
       const payload = createPayload("task_cancel", "Cancelled by user", {
         intent: "user_cancel",
@@ -602,19 +637,19 @@ export function registerCommands(
       });
 
       const Database = (await import("better-sqlite3")).default;
-      const dbPath = getDbPath(mamoru.getChannel());
+      const dbPath = getDbPath(hit.channel);
       const db = new Database(dbPath);
 
       try {
         const msgId = sendMessage(db, {
           from_agent: mamoru.getSessionId(),
           to_agent: task.workerSessionId,
-          channel: mamoru.getChannel(),
+          channel: hit.channel,
           task_id: taskId,
           ref_message_id: taskId,
           payload: JSON.stringify(payload),
         });
-        ctx.ui.notify(`Sent task_cancel for task #${taskId} (message #${msgId})`, "info");
+        ctx.ui.notify(`Sent task_cancel for task #${taskId} in "${hit.channel}" (message #${msgId})`, "info");
       } finally {
         db.close();
       }

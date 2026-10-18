@@ -5,7 +5,7 @@ import { Roster } from "../extensions/roster.ts";
 import { DEFAULT_MAMORU_CONFIG, parsePayload } from "../extensions/types.ts";
 import type { MessageRow } from "../extensions/types.ts";
 import { registerAgent } from "../extensions/db.ts";
-import { createSendMessageTool } from "../extensions/tools/send-message.ts";
+import { createSendMessageTool, resolveTargetChannel } from "../extensions/tools/send-message.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -49,8 +49,8 @@ function setup(overrides?: { sessionId?: string; channel?: string }) {
   });
 
   const sendMessage = createSendMessageTool({
-    getMamoru: () => mamoru,
-    getDb: () => db,
+    getPrimary: () => ({ channel, db, mamoru }),
+    listRuntimes: () => [{ channel, db, mamoru }],
   });
 
   return { db, pi, ctx, mamoru, roster, sendMessage, sessionId, channel };
@@ -131,7 +131,7 @@ describe("send_message with task_req", () => {
     const { sendMessage } = setup();
     expect(
       sendMessage.execute("tc1", { to: "unknown-agent", event: "task_req", content: "build it" }, undefined, undefined, dummyCtx),
-    ).rejects.toThrow('Agent "unknown-agent" not found in roster.');
+    ).rejects.toThrow('Agent "unknown-agent" not found in any joined channel roster.');
   });
 
   test("rejects if content exceeds 20 words", async () => {
@@ -426,5 +426,46 @@ describe("send_message", () => {
         undefined, undefined, dummyCtx,
       ),
     ).rejects.toThrow("exceeds 20 words");
+  });
+});
+
+// ── M2 cross-channel routing ────────────────────────────────────
+
+describe("resolveTargetChannel (M2 multi-channel routing)", () => {
+  const runtime = (channel: string, members: string[]) => ({
+    channel,
+    mamoru: {
+      getRoster: () => ({
+        getAll: () => members.map((m) => ({ session_id: `sid-${channel}-${m}`, agent_name: m })),
+      }),
+    },
+  });
+
+  test("explicit channel wins", () => {
+    const rt = resolveTargetChannel([runtime("a", ["bob"]), runtime("b", ["bob"])], null, null, "b");
+    expect(rt.channel).toBe("b");
+  });
+
+  test("direct target resolves across channels by name", () => {
+    const rt = resolveTargetChannel([runtime("a", ["alice"]), runtime("b", ["bob"])], null, "bob", undefined);
+    expect(rt.channel).toBe("b");
+  });
+
+  test("ambiguous target in two channels throws without guessing", () => {
+    expect(() =>
+      resolveTargetChannel([runtime("a", ["bob"]), runtime("b", ["bob"])], null, "bob", undefined),
+    ).toThrow(/Ambiguous recipient "bob".*a, b/);
+  });
+
+  test("unknown target throws", () => {
+    expect(() =>
+      resolveTargetChannel([runtime("a", ["alice"])], null, "ghost", undefined),
+    ).toThrow(/not found in any joined channel roster/);
+  });
+
+  test("broadcast defaults to primary channel", () => {
+    const primary = runtime("a", ["alice"]);
+    const rt = resolveTargetChannel([runtime("b", ["bob"]), primary], primary, null, undefined);
+    expect(rt.channel).toBe("a");
   });
 });

@@ -29,8 +29,16 @@ function formatUptime(ms: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  let mamoru: Mamoru | null = null;
-  let activeDb: Database.Database | null = null;
+  // M2: multi-channel instance table. One session may join N channels; each
+  // has its own SQLite DB + MAMORU instance. primaryChannel is the fallback
+  // target for single-instance surfaces (TTS, overlays, broadcasts).
+  interface ChannelRuntime {
+    channel: string;
+    db: Database.Database;
+    mamoru: Mamoru;
+  }
+  const runtimes = new Map<string, ChannelRuntime>();
+  let primaryChannel: string | null = null;
   let extensionCtx: ExtensionContext | null = null;
   let uptimeTimer: ReturnType<typeof setInterval> | null = null;
   let unsubscribeHintWatcher: (() => void) | null = null;
@@ -55,12 +63,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── TTS ──────────────────────────────────────────────────────────
-  const tts = setupTts(pi, () => activeDb);
+  const getPrimary = (): ChannelRuntime | null => {
+    if (primaryChannel) return runtimes.get(primaryChannel) ?? null;
+    for (const rt of runtimes.values()) return rt;
+    return null;
+  };
+  const tts = setupTts(pi, () => getPrimary()?.db ?? null);
 
   // ── Tools ───────────────────────────────────────────────────────
   const sendMessageTool = createSendMessageTool({
-    getMamoru: () => mamoru,
-    getDb: () => activeDb,
+    getPrimary: () => getPrimary(),
+    listRuntimes: () => [...runtimes.values()],
   });
   pi.registerTool(sendMessageTool);
 
@@ -81,23 +94,29 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Update send_message description when roster changes
-  pi.events.on("teammate_roster_changed", (data: any) => {
-    const newDesc = data.roster.buildToolDescription(data.selfSessionId);
-    pi.registerTool({ ...sendMessageTool, description: newDesc });
+  // Rebuild the combined tool description across ALL joined channels
+  pi.events.on("teammate_roster_changed", () => {
+    const parts: string[] = [];
+    for (const rt of runtimes.values()) {
+      parts.push(`[Channel: ${rt.channel}]\n${rt.mamoru.getRoster().buildToolDescription(rt.mamoru.getSessionId())}`);
+    }
+    const desc = parts.length > 0 ? parts.join("\n\n") : "Not connected to any team channel.";
+    pi.registerTool({ ...sendMessageTool, description: desc });
   });
 
   // ── Uptime Footer Status ─────────────────────────────────────
   function startUptimeDisplay(ctx: ExtensionContext): void {
     stopUptimeDisplay(ctx);
     uptimeTimer = setInterval(() => {
-      if (mamoru?.isActive()) {
-        const channel = mamoru.getChannel();
-        const uptime = formatUptime(mamoru.getUptimeMs());
-        ctx.ui.setStatus("teammate", `${channel}: ${uptime}`);
-      } else {
+      if (runtimes.size === 0) {
         ctx.ui.setStatus("teammate", "mamoru: inactive");
+        return;
       }
+      const parts: string[] = [];
+      for (const rt of runtimes.values()) {
+        parts.push(rt.mamoru.isActive() ? `${rt.channel}:${formatUptime(rt.mamoru.getUptimeMs())}` : `${rt.channel}:off`);
+      }
+      ctx.ui.setStatus("teammate", parts.join(" · "));
     }, 1000);
   }
 
@@ -110,6 +129,19 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Bootstrap Helper ────────────────────────────────────────────
+  function leaveChannel(channel: string): boolean {
+    const rt = runtimes.get(channel);
+    if (!rt) return false;
+    try { rt.mamoru.stop(); } catch {}
+    try { rt.db.close(); } catch {}
+    runtimes.delete(channel);
+    if (primaryChannel === channel) {
+      primaryChannel = runtimes.size > 0 ? [...runtimes.keys()][0]! : null;
+    }
+    if (runtimes.size === 0) deactivateSendMessageTool();
+    return true;
+  }
+
   function bootstrapMamoru(ctx: ExtensionContext, channel: string, agentName: string, persona: import("./persona.ts").PersonaConfig | null, forceNew?: boolean): void {
     const sessionId = ctx.sessionManager.getSessionId();
     const channelDir = getChannelDir(channel);
@@ -129,20 +161,25 @@ export default function (pi: ExtensionAPI) {
       console.log(`[teammate] Created channel DB: ${dbPath}`);
     }
 
+    // Re-join of an already-joined channel: tear down the old instance first.
+    const existing = runtimes.get(channel);
+    if (existing) {
+      try { existing.mamoru.stop(); } catch {}
+      try { existing.db.close(); } catch {}
+      runtimes.delete(channel);
+      if (primaryChannel === channel) primaryChannel = null;
+    }
+
     // Create this teammate's detail directory
     const teammateDir = getTeammateDir(channel, sessionId);
 
-    if (activeDb) {
-      try { activeDb.close(); } catch {}
-    }
     const db = new Database(dbPath);
     initSchema(db);
-    activeDb = db;
 
     const roster = new Roster();
 
-    mamoru = new Mamoru({
-      db: activeDb,
+    const m = new Mamoru({
+      db,
       sessionId,
       agentName,
       channel,
@@ -153,7 +190,9 @@ export default function (pi: ExtensionAPI) {
       config: DEFAULT_MAMORU_CONFIG,
       teammateDir,
     });
-    mamoru.start();
+    m.start();
+    runtimes.set(channel, { channel, db, mamoru: m });
+    if (!primaryChannel) primaryChannel = channel;
     startUptimeDisplay(ctx);
     activateSendMessageTool();
 
@@ -168,16 +207,28 @@ export default function (pi: ExtensionAPI) {
   // ── Commands ────────────────────────────────────────────────────
   const { hintRegistry } = registerCommands(
     pi,
-    () => mamoru,
+    () => getPrimary()?.mamoru ?? null,
     (m) => {
-      mamoru = m;
       if (m === null) {
-        // /team-leave just cleared MAMORU — hide send_message from the LLM.
-        deactivateSendMessageTool();
+        // Legacy single-leave hook: a command cleared MAMORU — hide send_message.
+        const pc = primaryChannel;
+        if (pc) leaveChannel(pc);
+        if (runtimes.size === 0) deactivateSendMessageTool();
       }
     },
     () => extensionCtx,
-    { bootstrapMamoru },
+    {
+      bootstrapMamoru,
+      multi: {
+        has: (channel: string) => runtimes.has(channel),
+        leave: leaveChannel,
+        leaveAll: () => {
+          for (const ch of [...runtimes.keys()]) leaveChannel(ch);
+        },
+        all: () => [...runtimes.values()],
+        primary: getPrimary,
+      },
+    },
   );
 
   // ── Prefix Keys (Ctrl+T → m/r/t) + Esc to close ──────────
@@ -185,7 +236,7 @@ export default function (pi: ExtensionAPI) {
     pi,
     () => extensionCtx,
     () => {
-      if (!mamoru || !extensionCtx) return null;
+      if (runtimes.size === 0 || !extensionCtx) return null;
       const ctx = extensionCtx;
       return {
         m: () => {
@@ -275,7 +326,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ── Auto-join team channel(s) from CLI flags + declared persona channels ──
-    const channel = pi.getFlag("team-channel") as string | undefined;
+    // M2: union of --team-channel and persona.channels — join ALL of them.
+    const flagChannel = pi.getFlag("team-channel") as string | undefined;
     let agentName: string | undefined;
     if (resolvedPersona) {
       agentName = channelIdentity(resolvedPersona);
@@ -283,28 +335,16 @@ export default function (pi: ExtensionAPI) {
       agentName = flagAgentName;
     }
 
-    if (!channel && !agentName) {
-      // No team flags — still init TTS for /tts-test command
-      tts?.onSessionStart(ctx, null);
-      return;
-    }
+    const targets = new Set<string>();
+    if (flagChannel) targets.add(flagChannel);
+    if (resolvedPersona?.channels) for (const c of resolvedPersona.channels) targets.add(c);
 
-    let joinChannel = channel;
-    if (!joinChannel && resolvedPersona?.channels?.length) {
-      // L1: declarative membership. Single-channel session joins the first
-      // declared channel; true multi-channel sessions land in M2.
-      joinChannel = resolvedPersona.channels[0]!;
-      if (resolvedPersona.channels.length > 1) {
-        ctx.ui.notify(
-          `persona declares ${resolvedPersona.channels.length} channels — joining "${joinChannel}" (multi-channel arrives in M2)`,
-          "info",
-        );
+    if (targets.size === 0) {
+      // Nothing to join — still init TTS for /tts-test command
+      tts?.onSessionStart(ctx, null);
+      if (agentName) {
+        ctx.ui.notify("No channel to join: pass --team-channel or declare 'channels' in the persona.", "info");
       }
-    }
-
-    if (!joinChannel) {
-      // agentName from persona but no channel — nothing to join
-      tts?.onSessionStart(ctx, null);
       return;
     }
 
@@ -315,16 +355,26 @@ export default function (pi: ExtensionAPI) {
     }
 
     const forceNew = pi.getFlag("team-new") as boolean | undefined;
-    bootstrapMamoru(ctx, joinChannel, agentName, resolvedPersona, forceNew || false);
-    console.log(`[teammate] Joined "${joinChannel}" as "${agentName}"${forceNew ? " (clean start)" : ""}`);
+    for (const ch of targets) {
+      // --team-new only resets the explicitly flagged channel.
+      bootstrapMamoru(ctx, ch, agentName, resolvedPersona, forceNew === true && ch === flagChannel);
+      console.log(`[teammate] Joined "${ch}" as "${agentName}"`);
+    }
     // TTS poller is started inside bootstrapMamoru.
   });
 
   // Inject persona + task context into system prompt
   pi.on("before_agent_start", async (event, ctx) => {
-    // When mamoru is active, it handles persona + task additions
-    if (mamoru) {
-      return mamoru.buildSystemPromptAdditions(event.systemPrompt);
+    // Multi-channel (M2): primary instance builds the base (persona + tag +
+    // its channel section); every other joined channel appends a section.
+    const primary = getPrimary();
+    if (primary) {
+      let base = primary.mamoru.buildSystemPromptAdditions(event.systemPrompt)?.systemPrompt ?? event.systemPrompt;
+      for (const rt of runtimes.values()) {
+        if (rt.channel === primary.channel) continue;
+        base += "\n\n" + rt.mamoru.buildChannelSection();
+      }
+      return { systemPrompt: base };
     }
 
     // When not in a team, still apply persona systemPrompt if present
@@ -350,11 +400,12 @@ export default function (pi: ExtensionAPI) {
       unsubscribeHintWatcher();
       unsubscribeHintWatcher = null;
     }
-    mamoru?.stop();
-    mamoru = null;
-    if (activeDb) {
-      try { activeDb.close(); } catch {}
-      activeDb = null;
+    const all = [...runtimes.values()];
+    runtimes.clear();
+    primaryChannel = null;
+    for (const rt of all) {
+      try { rt.mamoru.stop(); } catch {}
+      try { rt.db.close(); } catch {}
     }
   });
 }

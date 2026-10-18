@@ -35,6 +35,13 @@ function setup() {
           stop: () => {},
         };
       },
+      multi: {
+        has: (channel: string) => bootstrapCalls.some((c) => c.channel === channel),
+        leave: () => true,
+        leaveAll: () => {},
+        all: () => [],
+        primary: () => null,
+      },
     },
   );
 

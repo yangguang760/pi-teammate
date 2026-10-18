@@ -847,7 +847,7 @@ export class Mamoru {
   private forwardToLlm(msg: MessageRow, payload: MessagePayload): void {
     const fromName = this.getAgentDisplayName(msg.from_agent);
     const lines = [
-      `[TEAM MESSAGE from "${fromName}" | event: ${payload.event} | task: #${msg.task_id ?? "none"} | ref: #${msg.ref_message_id ?? "none"}]`,
+      `[TEAM MESSAGE ch="${this.channel}" from "${fromName}" | event: ${payload.event} | task: #${msg.task_id ?? "none"} | ref: #${msg.ref_message_id ?? "none"}]`,
       payload.content,
     ];
     if (payload.detail) lines.push(`Detail file: ${payload.detail}`);
@@ -907,6 +907,28 @@ export class Mamoru {
     if (agent) return agent.agent_name;
 
     return sessionId;
+  }
+
+  /**
+   * Multi-channel (M2): per-channel section for the composed system prompt.
+   * Identity/persona/tag are session-global (built once by the primary); this
+   * section carries only what differs per channel: roster + active task.
+   */
+  buildChannelSection(): string {
+    const lines: string[] = [`[Channel: ${this.channel}]`];
+    const teammates = this.roster.getAll();
+    if (teammates.length > 0) {
+      for (const e of teammates) {
+        lines.push(`- "${e.agent_name}" (session: ${e.session_id}) — ${e.status} — ${e.description}`);
+      }
+    } else {
+      lines.push("(no other teammates online)");
+    }
+    if (this.activeTask) {
+      const requesterName = this.getAgentDisplayName(this.activeTask.requesterSessionId);
+      lines.push(`Working on task #${this.activeTask.taskId} requested by "${requesterName}". Report via to="${this.activeTask.requesterSessionId}" with channel "${this.channel}".`);
+    }
+    return lines.join("\n");
   }
 
   /** Log an outbound event from a tool (send_message). */

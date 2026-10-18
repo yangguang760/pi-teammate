@@ -17,6 +17,7 @@ export const SendMessageParams = Type.Object({
   intent: Type.Optional(Type.String({ description: "Freeform intent hint" })),
   blocking: Type.Optional(Type.Boolean({ description: "For task_req only. If true, MAMORU auto-retries when rejected (waits for recipient to become available). If false (default), you are notified of the rejection and can retry manually when the recipient is available." })),
   gate: Type.Optional(Type.String({ description: "For task_req only. Set to 'milestone' to make the requester pause receiving new messages after this task's task_done arrives, until a human runs /team-resume." })),
+  channel: Type.Optional(Type.String({ description: "Joined channel to send on. Only needed when the recipient exists in more than one joined channel; broadcasts default to the primary channel." })),
 });
 
 export type SendMessageInput = Static<typeof SendMessageParams>;
@@ -30,9 +31,56 @@ export interface SendMessageDetails {
   blocking?: boolean;
 }
 
+export interface ChannelRuntimeView {
+  channel: string;
+  db: Database.Database;
+  mamoru: Mamoru;
+}
+
+/**
+ * M2 cross-channel routing: pick the joined channel a message should go out
+ * on. Explicit channel wins; direct targets resolve by roster across all
+ * joined channels (session_id or display name); ambiguity is an error, never
+ * a guess; broadcasts default to the primary channel.
+ */
+export function resolveTargetChannel<
+  T extends { channel: string; mamoru: { getRoster(): { getAll(): Array<{ session_id: string; agent_name: string }> } } },
+>(runtimes: T[], primary: ChannelRuntimeView | null, target: string | null, explicitChannel?: string): T {
+  if (runtimes.length === 0) {
+    throw new Error("Not connected to a team. Use /team-join first.");
+  }
+
+  if (explicitChannel) {
+    const rt = runtimes.find((r) => r.channel === explicitChannel);
+    if (!rt) {
+      throw new Error(
+        `Not joined to channel "${explicitChannel}". Joined: ${runtimes.map((r) => r.channel).join(", ")}.`,
+      );
+    }
+    return rt;
+  }
+
+  if (!target) {
+    // Broadcast — primary channel, unless told otherwise via 'channel'.
+    const primaryView = runtimes.find((r) => primary && r.channel === primary.channel);
+    return primaryView ?? runtimes[0]!;
+  }
+
+  const hits = runtimes.filter((r) =>
+    r.mamoru.getRoster().getAll().some((e) => e.session_id === target || e.agent_name === target),
+  );
+  if (hits.length === 1) return hits[0]!;
+  if (hits.length > 1) {
+    throw new Error(
+      `Ambiguous recipient "${target}" — present in channels: ${hits.map((h) => h.channel).join(", ")}. Set the 'channel' param to disambiguate.`,
+    );
+  }
+  throw new Error(`Agent "${target}" not found in any joined channel roster.`);
+}
+
 export function createSendMessageTool(opts: {
-  getMamoru: () => Mamoru | null;
-  getDb: () => Database.Database | null;
+  getPrimary: () => ChannelRuntimeView | null;
+  listRuntimes: () => ChannelRuntimeView[];
 }) {
   return {
     name: "send_message",
@@ -52,9 +100,16 @@ export function createSendMessageTool(opts: {
       onUpdate: AgentToolUpdateCallback<SendMessageDetails> | undefined,
       ctx: ExtensionContext,
     ): Promise<AgentToolResult<SendMessageDetails>> {
-      const mamoru = opts.getMamoru();
-      const db = opts.getDb();
-      if (!mamoru || !db) throw new Error("Not connected to a team. Use /team-join first.");
+      const runtimes = opts.listRuntimes();
+      // Self-delegation guard runs BEFORE cross-channel routing: self is never
+      // in a roster, so routing would report a misleading "not found".
+      const selfId = opts.getPrimary()?.mamoru.getSessionId();
+      if (params.event === "task_req" && params.to && selfId && params.to === selfId) {
+        throw new Error("Cannot send a task_req to yourself. Pick a different teammate.");
+      }
+      const rt = resolveTargetChannel(runtimes, opts.getPrimary(), params.to ?? null, params.channel);
+      const mamoru = rt.mamoru;
+      const db = rt.db;
 
       // Validate event
       if (!MESSAGE_EVENTS.includes(params.event as MessageEvent)) {
