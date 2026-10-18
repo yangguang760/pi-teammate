@@ -367,13 +367,20 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     // Multi-channel (M2): primary instance builds the base (persona + tag +
     // its channel section); every other joined channel appends a section.
+    // M3-lite: informational digests, one block per channel (if any).
     const primary = getPrimary();
     if (primary) {
       let base = primary.mamoru.buildSystemPromptAdditions(event.systemPrompt)?.systemPrompt ?? event.systemPrompt;
+      const extras: string[] = [];
       for (const rt of runtimes.values()) {
         if (rt.channel === primary.channel) continue;
-        base += "\n\n" + rt.mamoru.buildChannelSection();
+        extras.push(rt.mamoru.buildChannelSection());
       }
+      for (const rt of runtimes.values()) {
+        const digest = rt.mamoru.buildDigestBlock();
+        if (digest) extras.push(`[Channel: ${rt.channel}]\n${digest}`);
+      }
+      if (extras.length > 0) base += "\n\n" + extras.join("\n\n");
       return { systemPrompt: base };
     }
 

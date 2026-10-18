@@ -756,27 +756,20 @@ describe("three-agent collaboration", () => {
       payload: JSON.stringify(broadcastPayload),
     });
 
-    // B and C poll
+    // B and C poll — M3-lite: broadcast lands in each member's digest
     b.mamoru.pollOnce();
     c.mamoru.pollOnce();
 
-    // Both should see the broadcast forwarded to LLM
-    const bBroadcasts = b.pi.sentUserMessages.filter((m: any) =>
-      typeof m.content === "string" && m.content.includes("Deploy complete!"),
-    );
-    const cBroadcasts = c.pi.sentUserMessages.filter((m: any) =>
-      typeof m.content === "string" && m.content.includes("Deploy complete!"),
-    );
+    const bDigest = b.mamoru.buildDigestBlock() ?? "";
+    const cDigest = c.mamoru.buildDigestBlock() ?? "";
 
-    expect(bBroadcasts.length).toBe(1);
-    expect(cBroadcasts.length).toBe(1);
+    expect(bDigest).toContain("Deploy complete!");
+    expect(cDigest).toContain("Deploy complete!");
 
     // A should NOT see its own broadcast
     a.mamoru.pollOnce();
-    const aSelfBroadcasts = a.pi.sentUserMessages.filter((m: any) =>
-      typeof m.content === "string" && m.content.includes("Deploy complete!"),
-    );
-    expect(aSelfBroadcasts.length).toBe(0);
+    const aSelfDigest = a.mamoru.buildDigestBlock() ?? "";
+    expect(aSelfDigest).not.toContain("Deploy complete!");
 
     a.mamoru.stop();
     b.mamoru.stop();
@@ -940,17 +933,13 @@ describe("message isolation", () => {
     b.mamoru.pollOnce();
     c.mamoru.pollOnce();
 
-    // B should see the message
-    const bInfoMsgs = b.pi.sentUserMessages.filter((m: any) =>
-      typeof m.content === "string" && m.content.includes("Secret info for B only"),
-    );
-    expect(bInfoMsgs.length).toBe(1);
+    // B sees the message (M3-lite: info_only digests into B's buffer)
+    const bDigest = b.mamoru.buildDigestBlock() ?? "";
+    expect(bDigest).toContain("Secret info for B only");
 
-    // C should NOT see the message (it's directed to B)
-    const cInfoMsgs = c.pi.sentUserMessages.filter((m: any) =>
-      typeof m.content === "string" && m.content.includes("Secret info for B only"),
-    );
-    expect(cInfoMsgs.length).toBe(0);
+    // C should NOT see the message (directed to B)
+    const cDigest = c.mamoru.buildDigestBlock() ?? "";
+    expect(cDigest).not.toContain("Secret info for B only");
 
     a.mamoru.stop();
     b.mamoru.stop();

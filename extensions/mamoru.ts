@@ -89,7 +89,7 @@ export class Mamoru {
   private status: AgentStatus = "available";
   private activeTask: ActiveTask | null = null;
   private outboundTasks: Map<number, OutboundTask> = new Map();
-  private contextBuffer: string[] = []; // buffered broadcast/info messages
+  private digestBuffer: { event: string; from: string; content: string; detail: string | null }[] = []; // M3-lite: informational messages merged into one block at the next turn boundary
   private eventLog: MamoruEventLog[] = [];
   private pendingRetries: Map<string, PendingRetry> = new Map(); // keyed by targetSessionId
   private parkedRequeues: Map<number, ParkedRequeue> = new Map(); // keyed by taskId
@@ -747,15 +747,20 @@ export class Mamoru {
             this.refreshSendMessageTool();
           }
         } else {
-          this.contextBuffer.push(`[${payload.event}] ${payload.content}`);
-          this.forwardToLlm(msg, payload);
+          // M3-lite: informational broadcasts don't interrupt the LLM — they
+          // merge into one digest injected at the next turn boundary.
+          if (payload.need_reply === true) {
+            // An assertive broadcast — treat as direct traffic.
+            this.forwardToLlm(msg, payload);
+          } else {
+            this.bufferDigest("broadcast", fromName, payload);
+          }
         }
         break;
 
       case "info_only":
-        this.logEvent("recv", "info_only", fromName, msg.task_id, payload.content, true);
-        this.contextBuffer.push(`[info] ${payload.content}`);
-        this.forwardToLlm(msg, payload);
+        this.logEvent("recv", "info_only", fromName, msg.task_id, payload.content, false);
+        this.bufferDigest("info_only", fromName, payload);
         break;
 
       case "task_ack":
@@ -929,6 +934,36 @@ export class Mamoru {
       lines.push(`Working on task #${this.activeTask.taskId} requested by "${requesterName}". Report via to="${this.activeTask.requesterSessionId}" with channel "${this.channel}".`);
     }
     return lines.join("\n");
+  }
+
+  /**
+   * M3-lite: buffer an informational message for the next turn's digest.
+   * Oldest entries drop past 50 — informational chatter is the lowest-value
+   * traffic and must never grow unbounded.
+   */
+  private bufferDigest(event: string, fromName: string, payload: MessagePayload): void {
+    this.digestBuffer.push({ event, from: fromName, content: payload.content, detail: payload.detail ?? null });
+    if (this.digestBuffer.length > 50) this.digestBuffer.shift();
+  }
+
+  /**
+   * Merge buffered informational messages into ONE block and clear the
+   * buffer. Returns null when nothing is pending. Called at turn boundaries
+   * (before_agent_start) so broadcasts never interrupt a running turn.
+   */
+  buildDigestBlock(): string | null {
+    if (this.digestBuffer.length === 0) return null;
+    const items = [...this.digestBuffer];
+    this.digestBuffer.length = 0;
+    const shown = items.slice(-20);
+    const older = items.length - shown.length;
+    const lines = shown.map(
+      (d) => `- (${d.event}) ${d.from}: ${d.content}${d.detail ? ` [detail: ${d.detail}]` : ""}`,
+    );
+    const head = `[DIGEST] ${items.length} informational message${items.length === 1 ? "" : "s"} since your last turn:`;
+    return [head, ...lines, older > 0 ? `…and ${older} older (see /team-history).` : ""]
+      .filter((l) => l !== "")
+      .join("\n");
   }
 
   /** Log an outbound event from a tool (send_message). */

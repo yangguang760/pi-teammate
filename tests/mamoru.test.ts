@@ -554,8 +554,10 @@ describe("Mamoru – broadcast", () => {
     });
     mamoru.pollOnce();
 
-    expect(pi.sentUserMessages.length).toBe(1);
-    expect(pi.sentUserMessages[0].content).toContain("general announcement");
+    // M3-lite: informational broadcasts merge into the digest instead of
+    // interrupting the LLM.
+    expect(pi.sentUserMessages.length).toBe(0);
+    expect(mamoru.buildDigestBlock()).toContain("general announcement");
   });
 });
 
@@ -675,11 +677,12 @@ describe("Mamoru – info_only", () => {
     });
     mamoru.pollOnce();
 
-    expect(pi.sentUserMessages.length).toBe(1);
-    expect(pi.sentUserMessages[0].content).toContain("FYI: server rebooting");
+    // M3-lite: info_only is informational — buffered into the digest.
+    expect(pi.sentUserMessages.length).toBe(0);
+    expect(mamoru.buildDigestBlock()).toContain("FYI: server rebooting");
   });
 
-  test("info_only is buffered in contextBuffer", () => {
+  test("info_only lands in the digest buffer", () => {
     const { mamoru, db, pi } = createMamoru();
     mamoru.start();
 
@@ -690,10 +693,11 @@ describe("Mamoru – info_only", () => {
     });
     mamoru.pollOnce();
 
-    // The message was forwarded to LLM (verified by sentUserMessages)
-    expect(pi.sentUserMessages.length).toBe(1);
-    // Info was forwarded — that's the key behavior
-    expect(pi.sentUserMessages[0].content).toContain("info");
+    // M3-lite: info_only lands in the digest buffer (contextBuffer removed).
+    expect(pi.sentUserMessages.length).toBe(0);
+    const block = mamoru.buildDigestBlock()!;
+    expect(block).toContain("some info message");
+    expect(block).toContain("(info_only)");
   });
 });
 
@@ -918,7 +922,12 @@ describe("Mamoru – poll loop", () => {
 
     mamoru.pollOnce();
 
-    expect(pi.sentUserMessages.length).toBe(3);
+    // All three were consumed into the digest (M3-lite: info_only digests).
+    const block = mamoru.buildDigestBlock()!;
+    expect(block).toContain("msg1");
+    expect(block).toContain("msg2");
+    expect(block).toContain("msg3");
+    expect(mamoru.buildDigestBlock()).toBeNull();
   });
 
   test("pollOnce advances cursor so same messages are not re-read", () => {
@@ -927,16 +936,16 @@ describe("Mamoru – poll loop", () => {
 
     sendFromRemote(db, { from: "remote-1", event: "info_only", content: "first batch" });
     mamoru.pollOnce();
-    expect(pi.sentUserMessages.length).toBe(1);
+    expect(mamoru.buildDigestBlock()).toContain("first batch");
 
     // Second poll should not re-process
     mamoru.pollOnce();
-    expect(pi.sentUserMessages.length).toBe(1);
+    expect(mamoru.buildDigestBlock()).toBeNull();
 
     // New message should be picked up
     sendFromRemote(db, { from: "remote-1", event: "info_only", content: "second batch" });
     mamoru.pollOnce();
-    expect(pi.sentUserMessages.length).toBe(2);
+    expect(mamoru.buildDigestBlock()).toContain("second batch");
   });
 
   test("pollOnce does nothing when no messages", () => {
@@ -970,9 +979,9 @@ describe("Mamoru – poll loop", () => {
 
     mamoru.pollOnce();
 
-    // Only the valid message should be forwarded
-    expect(pi.sentUserMessages.length).toBe(1);
-    expect(pi.sentUserMessages[0].content).toContain("valid");
+    // Only the valid message should be consumed (into the digest, M3-lite)
+    const block = mamoru.buildDigestBlock()!;
+    expect(block).toContain("valid");
   });
 
   test("start() begins interval polling", async () => {
@@ -986,7 +995,10 @@ describe("Mamoru – poll loop", () => {
     // Wait for at least one poll cycle
     await new Promise((resolve) => setTimeout(resolve, 120));
 
-    expect(pi.sentUserMessages.length).toBeGreaterThanOrEqual(1);
+    // M3-lite: info_only lands in the digest instead of injecting immediately —
+    // the interval poll itself is what this test verifies.
+    const block = mamoru.buildDigestBlock() ?? "";
+    expect(block).toContain("timed");
 
     mamoru.stop();
   });
