@@ -196,6 +196,12 @@ export default function (pi: ExtensionAPI) {
     startUptimeDisplay(ctx);
     activateSendMessageTool();
 
+    // L1.5 permission bridge: persistent active-agent marker (persona may
+    // differ per join). See session_start for the non-team path.
+    try {
+      ctx.sessionManager.appendCustomEntry("active_agent", { name: agentName });
+    } catch {}
+
     // Start TTS poller for this channel (no-op if TTS not enabled, or
     // if poller already running). This must happen before mamoru.start()
     // emits the agent_join broadcast — but mamoru.start() is synchronous
@@ -295,6 +301,18 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`Failed to load persona: ${err.message}`, "warning");
     }
 
+    // L1.5 permission bridge (persistent side): pi-permission-system scans
+    // session entries for a custom "active_agent" entry to key per-agent
+    // frontmatter (<cwd>/.pi/agents/<agent>.md). The system-prompt tag alone
+    // is ephemeral and invisible to it.
+    if (resolvedPersona) {
+      try {
+        ctx.sessionManager.appendCustomEntry("active_agent", {
+          name: channelIdentity(resolvedPersona),
+        });
+      } catch {}
+    }
+
     // ── Apply persona provider/model/thinkingLevel on session start (also runs on /reload) ──
     try {
       const persona = resolvedPersona;
@@ -387,8 +405,11 @@ export default function (pi: ExtensionAPI) {
     // When not in a team, still apply persona systemPrompt if present
     try {
       const persona = resolvePersona(ctx.cwd, pi.getFlag("agent-name") as string | undefined);
-      if (persona?.systemPrompt) {
-        return { systemPrompt: event.systemPrompt + "\n\n" + personaIdentityTag(persona) + "\n\n" + persona.systemPrompt };
+      if (persona) {
+        // Tag always injected — the permission bridge must work even when the
+        // persona carries no systemPrompt.
+        const sp = persona.systemPrompt;
+        return { systemPrompt: event.systemPrompt + "\n\n" + personaIdentityTag(persona) + (sp ? "\n\n" + sp : "") };
       }
     } catch {
       // Silently ignore — persona errors are already reported on session_start
