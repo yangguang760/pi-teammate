@@ -61,6 +61,38 @@
 - 系统提示的 teammates roster = 多频道花名册合并去重,标注所属频道
 - 同名同频道仍互斥(takeover 语义不变);同名跨频道 = 同一身份多宿主,合法
 
+### L2.5 命令面 × 多频道语义(完整矩阵)
+
+多频道后每个 /team-xx 都要回答"作用于哪个频道"。分类原则:
+**默认聚合(aggregate),带参定位(per-channel),有歧义必报错不猜**。
+
+| 命令/入口 | 语义 | 无参行为 | 选频道语法 |
+|---|---|---|---|
+| `/team-join <ch>` | 创建实例 | 无参 = 列出已加入频道 | 显式 |
+| `/team-leave [ch]` | 销毁实例 | 需确认;`all` 全退 | 显式或 all |
+| `/team-send <to>` | 发消息 | — | **to 语法**见下 |
+| `/team-status [ch]` | 连接/任务状态 | 聚合全部频道 | 可选 |
+| `/team-roster [ch]` | 花名册 | 聚合(带频道前缀) | 可选 |
+| `/team-history [ch]` | 历史 | 需频道(量太大不聚合) | 必选,缺省提示 |
+| `/task-status` `/task-list` | 任务视图 | 聚合(带频道前缀) | 可选 |
+| `/task-cancel <id>` | 取消任务 | — | task id 全局唯一,自动路由 |
+| `/team-resume [ch]` | 解除 gate | 全部 gated 频道 | 可选或 all |
+| `/team-mute <ch>` `/team-digest <ch> <min>` | 噪音控制 | — | 必选 |
+| `/team-remove-inactive <ch> <name>` | 清尸 | — | 必选 |
+| `/persona-template` | 模板 | 会话级,与频道无关 | — |
+
+**send_message / to 语法(跨频道寻址)**:
+- 身份在频道内唯一 = `persona.channelName ?? name`;**跨频道可能重名**(同一会话的两个频道里各有一个 "bob",或对方的同名角色)
+- 规则:`to: "<ch>/<agent>"` 显式跨频道;裸 `"<agent>"` 仅在恰好一个频道存在该名字时可用,**歧义时报错并列出候选**,不猜
+- 系统提示的花名册逐条标注频道(`- "bob" @proj-a — available — …`),LLM 天然学会带前缀
+
+**其它多频道触碰点**:
+- TUI footer 聚合:`2ch: proj-a(1 pend) managers(idle)`;Ctrl-t r/t/m 覆盖层聚合视图 + 频道前缀
+- gate 按频道独立;某频道 gated 只冻结该频道收件箱,其余频道照常
+- watchdog/lease/requeue 天然 per-instance,零改动
+- CLI 启动:`--team-channel` 可重复传入(多次 flag = join 多频道);persona.channels 声明 + flag 传入取并集;`--team-new` 仅对显式指定的那一个频道生效
+- 跨频道权衡:一个 turn 里两个频道同时来活,LLM 串行处理——不做并发 turn(复杂度爆炸),排队即可
+
 ### L3 订阅式噪音控制(解 P2 后半)
 
 payload 增加两个可选字段(旧消息缺省 = mention 级,向后兼容):
