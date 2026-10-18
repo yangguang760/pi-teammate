@@ -1,9 +1,86 @@
-> **Fork notice (@yangguang760/pi-teammate v0.6.0):** this is a maintained fork of
+> **Fork notice (@yangguang760/pi-teammate v0.7.0):** this is a maintained fork of
 > [ross-jill-ws/pi-teammate](https://github.com/ross-jill-ws/pi-teammate) (MIT).
-> Divergences: crash-safe identity takeover (rejoin no longer loses downtime
-> messages), presence leases with stale-peer sweep, outbound task watchdog with
-> requeue/dead-letter, optional milestone gates with /team-resume, JSONL audit
-> trail. See LICENSE for attribution.
+
+## Fork features
+
+### Project-local persona registry
+
+No more per-role directories. Keep identities in the repo and launch from the
+project root:
+
+```
+<proj>/persona/developer.yaml
+<proj>/persona/reviewer.yaml
+```
+
+```bash
+pi --agent-name developer        # loads persona/developer.yaml
+```
+
+The launch cwd is the workspace (permission scope). Resolution order:
+`--agent-name` → `persona/<name>.yaml` → legacy `persona.yaml`.
+
+persona v2 fields:
+
+```yaml
+name: "dev"
+description: >
+  Fullstack developer...
+workspace: /abs/path            # permission scope (default: launch cwd)
+channels: [proj-a, managers]    # declarative membership, auto-joined
+channelName: projx-dev          # channel identity when the bare name collides
+                                # across projects sharing a channel
+skills: [code, test]            # advertised to teammates
+```
+
+Sessions inject `<active_agent name="...">`, so
+[@gotgenes/pi-permission-system](https://www.npmjs.com/package/@gotgenes/pi-permission-system)
+per-agent frontmatter (`<cwd>/.pi/agents/<agent>.md`) keys on the teammate
+identity with zero changes to that extension.
+
+### Multi-channel sessions
+
+One session, one identity, N channels — each with its own SQLite DB and
+MAMORU instance:
+
+```bash
+pi --agent-name manager         # joins ALL channels declared in persona.channels
+/team-join proj-b                # add a channel mid-session
+/team-leave proj-b               # or /team-leave all
+```
+
+- `send_message` routes across channels by roster (session_id or display
+  name); ambiguous names error with channel candidates; add `channel:` to
+  disambiguate; broadcasts default to the primary (first-joined) channel.
+- `/team-status`, `/team-roster`, `/task-status`, `/task-list` aggregate with
+  `[channel]` sections; `/task-cancel` searches every joined channel.
+- Milestone gates are per channel; `/team-resume [channel|all]`.
+
+### Informational digests
+
+`broadcast` / `info_only` messages (need_reply=false) no longer interrupt the
+LLM per message. They buffer per channel and merge into one `[DIGEST]` block
+at the next turn boundary (cap 50 entries, shows the last 20).
+`need_reply=true` broadcasts and all task traffic still inject immediately.
+
+### Crash safety (reliability line)
+
+- **Identity takeover** — crash → new session → rejoin replays every message
+  sent while the teammate was down (the old code skipped them forever).
+- **Presence leases** — 2s extension-timer heartbeat; dead peers are
+  tombstoned after 30s.
+- **Outbound watchdog** — a worker that dies mid-task is detected within one
+  poll cycle and its task requeues to a live teammate (≤3 attempts, then
+  dead-letter).
+- **Milestone gates** — `gate: "milestone"` on a task_req pauses the
+  requester's reception until a human runs `/team-resume`.
+
+See [documents/design-v2.md](documents/design-v2.md) for the full design.
+
+## Upstream documentation
+
+Everything below is the original pi-teammate README, still accurate unless
+noted above.
 
 # pi-teammate
 

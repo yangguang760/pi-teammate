@@ -1,6 +1,6 @@
 # pi-teammate v2 设计提案:身份注册表 · 多频道成员资格 · 订阅式噪音控制
 
-状态:PROPOSAL(未实施) · 2026-09
+状态:已部分实施 · 2026-09 —— L1/L1.5/L2/L2.5 已落地(M1/M2),L3-lite(digest)已落地,topic 订阅/mute 推迟,L5 跨机发现未实施
 上游基线:ross-jill-ws/pi-teammate v0.5.0 + 本 fork(身份接管/lease/看门狗/milestone gate)
 
 ## 0. 要解决的三个问题

@@ -1,6 +1,6 @@
 {
   "name": "@yangguang760/pi-teammate",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Pi agent-to-agent team communication via shared SQLite message bus with MAMORU guardian — fork of pi-teammate with identity-takeover rejoin fix, presence leases, and an outbound watchdog",
   "repository": {
     "type": "git",
@@ -28,7 +28,8 @@
     "skills",
     "package.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "bun test",
