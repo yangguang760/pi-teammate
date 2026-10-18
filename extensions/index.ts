@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import Database from "better-sqlite3";
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { initSchema } from "./schema.ts";
-import { loadPersona } from "./persona.ts";
+import { resolvePersona, channelIdentity, personaIdentityTag } from "./persona.ts";
 import { Mamoru } from "./mamoru.ts";
 import { Roster } from "./roster.ts";
 import { createSendMessageTool } from "./tools/send-message.ts";
@@ -110,7 +110,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Bootstrap Helper ────────────────────────────────────────────
-  function bootstrapMamoru(ctx: ExtensionContext, channel: string, agentName: string, forceNew?: boolean): void {
+  function bootstrapMamoru(ctx: ExtensionContext, channel: string, agentName: string, persona: import("./persona.ts").PersonaConfig | null, forceNew?: boolean): void {
     const sessionId = ctx.sessionManager.getSessionId();
     const channelDir = getChannelDir(channel);
     const dbPath = getDbPath(channel);
@@ -139,7 +139,6 @@ export default function (pi: ExtensionAPI) {
     initSchema(db);
     activeDb = db;
 
-    const persona = loadPersona(ctx.cwd);
     const roster = new Roster();
 
     mamoru = new Mamoru({
@@ -236,9 +235,18 @@ export default function (pi: ExtensionAPI) {
     }
     unsubscribeHintWatcher = setupHintWatcher(ctx, hintRegistry);
 
+    // ── Resolve identity (L1 registry): --agent-name → persona/<name>.yaml → persona.yaml ──
+    const flagAgentName = pi.getFlag("agent-name") as string | undefined;
+    let resolvedPersona: import("./persona.ts").PersonaConfig | null = null;
+    try {
+      resolvedPersona = resolvePersona(ctx.cwd, flagAgentName);
+    } catch (err: any) {
+      ctx.ui.notify(`Failed to load persona: ${err.message}`, "warning");
+    }
+
     // ── Apply persona provider/model/thinkingLevel on session start (also runs on /reload) ──
     try {
-      const persona = loadPersona(ctx.cwd);
+      const persona = resolvedPersona;
       if (persona) {
         if (persona.provider && persona.model) {
           const modelObj = ctx.modelRegistry.find(persona.provider, persona.model);
@@ -266,20 +274,13 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`Failed to load persona.yaml: ${err.message}`, "warning");
     }
 
-    // ── Auto-join team channel from CLI flags ──
+    // ── Auto-join team channel(s) from CLI flags + declared persona channels ──
     const channel = pi.getFlag("team-channel") as string | undefined;
-    let agentName = pi.getFlag("agent-name") as string | undefined;
-
-    // Fall back to persona name if --agent-name not provided
-    if (!agentName) {
-      try {
-        const persona = loadPersona(ctx.cwd);
-        if (persona?.name) {
-          agentName = persona.name;
-        }
-      } catch {
-        // persona already loaded above; ignore errors here
-      }
+    let agentName: string | undefined;
+    if (resolvedPersona) {
+      agentName = channelIdentity(resolvedPersona);
+    } else if (flagAgentName) {
+      agentName = flagAgentName;
     }
 
     if (!channel && !agentName) {
@@ -288,7 +289,20 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (!channel) {
+    let joinChannel = channel;
+    if (!joinChannel && resolvedPersona?.channels?.length) {
+      // L1: declarative membership. Single-channel session joins the first
+      // declared channel; true multi-channel sessions land in M2.
+      joinChannel = resolvedPersona.channels[0]!;
+      if (resolvedPersona.channels.length > 1) {
+        ctx.ui.notify(
+          `persona declares ${resolvedPersona.channels.length} channels — joining "${joinChannel}" (multi-channel arrives in M2)`,
+          "info",
+        );
+      }
+    }
+
+    if (!joinChannel) {
       // agentName from persona but no channel — nothing to join
       tts?.onSessionStart(ctx, null);
       return;
@@ -301,8 +315,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     const forceNew = pi.getFlag("team-new") as boolean | undefined;
-    bootstrapMamoru(ctx, channel, agentName, forceNew || false);
-    console.log(`[teammate] Joined "${channel}" as "${agentName}"${forceNew ? " (clean start)" : ""}`);
+    bootstrapMamoru(ctx, joinChannel, agentName, resolvedPersona, forceNew || false);
+    console.log(`[teammate] Joined "${joinChannel}" as "${agentName}"${forceNew ? " (clean start)" : ""}`);
     // TTS poller is started inside bootstrapMamoru.
   });
 
@@ -315,9 +329,9 @@ export default function (pi: ExtensionAPI) {
 
     // When not in a team, still apply persona systemPrompt if present
     try {
-      const persona = loadPersona(ctx.cwd);
+      const persona = resolvePersona(ctx.cwd, pi.getFlag("agent-name") as string | undefined);
       if (persona?.systemPrompt) {
-        return { systemPrompt: event.systemPrompt + "\n\n" + persona.systemPrompt };
+        return { systemPrompt: event.systemPrompt + "\n\n" + personaIdentityTag(persona) + "\n\n" + persona.systemPrompt };
       }
     } catch {
       // Silently ignore — persona errors are already reported on session_start

@@ -13,7 +13,7 @@ import type { MessageRow, MessagePayload } from "./types.ts";
 import { sendMessage, getMessagesByTaskId, getInactiveAgentsByName, deleteAgent } from "./db.ts";
 import { broadcastAgentLeave, type Mamoru } from "./mamoru.ts";
 import { getChannelDir, getDbPath, channelExists } from "./paths.ts";
-import { loadPersona } from "./persona.ts";
+import { loadPersona, resolvePersona, channelIdentity } from "./persona.ts";
 
 // ── Slash-command usage hints ───────────────────────────────────
 //
@@ -147,7 +147,7 @@ export function registerCommands(
   setMamoru: (m: Mamoru | null) => void,
   getCtx: () => ExtensionContext | null,
   opts: {
-    bootstrapMamoru: (ctx: ExtensionContext, channel: string, agentName: string) => void;
+    bootstrapMamoru: (ctx: ExtensionContext, channel: string, agentName: string, persona: import("./persona.ts").PersonaConfig | null) => void;
   },
 ): { hintRegistry: Map<string, UsageHint> } {
   // Per-registration registry of slash-command usage hints. Built up below
@@ -214,18 +214,18 @@ export function registerCommands(
         return;
       }
 
-      // Agent name precedence: explicit arg > persona.yaml name > session id
+      // Agent name precedence: explicit arg > persona registry/legacy persona.yaml > session id
       let agentName = parts[1];
-      if (!agentName) {
-        try {
-          const persona = loadPersona(ctx.cwd);
-          if (persona?.name) agentName = persona.name;
-        } catch {
-          // ignore persona errors here — they're already surfaced on session_start
-        }
+      let joinPersona: import("./persona.ts").PersonaConfig | null = null;
+      try {
+        joinPersona = resolvePersona(ctx.cwd, agentName ?? null);
+      } catch (err: any) {
+        // Broken persona must not lock the operator out of the channel:
+        // warn and join without persona (identity falls back below).
+        ctx.ui.notify(`Failed to load persona: ${err.message}`, "warning");
       }
       if (!agentName) {
-        agentName = ctx.sessionManager.getSessionId();
+        agentName = joinPersona ? channelIdentity(joinPersona) : ctx.sessionManager.getSessionId();
       }
 
       // Check if already joined
@@ -239,7 +239,7 @@ export function registerCommands(
       }
 
       try {
-        opts.bootstrapMamoru(ctx, channel, agentName);
+        opts.bootstrapMamoru(ctx, channel, agentName, joinPersona);
         ctx.ui.notify(`Joined channel "${channel}" as "${agentName}"`, "info");
       } catch (err: any) {
         ctx.ui.notify(`Failed to join: ${err.message}`, "error");

@@ -102,6 +102,14 @@ export interface PersonaConfig {
   thinkingLevel: ThinkingLevel | null;
   description: string;
   systemPrompt: string | null;
+  /** Absolute path this identity operates in. Defaults to the launch cwd. */
+  workspace?: string;
+  /** Declarative channel memberships; auto-joined at session start. */
+  channels?: string[];
+  /** Identity used inside a channel when it must differ from `name` (cross-project shared channels). Defaults to `name`. */
+  channelName?: string;
+  /** Capability tags advertised to teammates (A2A agent-card flavored). */
+  skills?: string[];
   /** Any additional user-defined properties from persona.yaml. */
   [key: string]: unknown;
 }

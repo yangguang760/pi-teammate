@@ -36,6 +36,7 @@ import {
   markStaleAgentsInactive,
 } from "./db.ts";
 import { Roster } from "./roster.ts";
+import { channelIdentity, personaIdentityTag, personaIdentityCard } from "./persona.ts";
 
 /** A single entry in the MAMORU event log. */
 export interface MamoruEventLog {
@@ -386,7 +387,19 @@ export class Mamoru {
     let additions = "";
 
     if (this.persona) {
+      // L1.5 permission bridge: keys per-agent frontmatter in
+      // <cwd>/.pi/agents/<agent>.md (see pi-permission-system docs).
+      additions += `\n\n${personaIdentityTag(this.persona)}`;
       additions += `\n\nYou are "${this.persona.name}"`;
+      const effectiveWorkspace = this.persona.workspace || this.ctx.cwd || "";
+      if (effectiveWorkspace) {
+        for (const line of personaIdentityCard(this.persona, effectiveWorkspace)) {
+          additions += `\n${line}`;
+        }
+      }
+      if (channelIdentity(this.persona) !== this.persona.name) {
+        additions += `\nYour channel identity is "${channelIdentity(this.persona)}" — teammates know you by that name.`;
+      }
       if (this.persona.systemPrompt) {
         additions += `\n\n${this.persona.systemPrompt}`;
       } else {
