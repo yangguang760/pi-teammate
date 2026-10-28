@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — multi-instance roles (one role, N sessions)
+## 0.8.0 — multi-instance roles (one role, N sessions)
 
 - `/team-join <channel> [agentName] [instance]` gains an instance number:
   joins as `researcher-2`/`researcher-3`/… so several sessions of one role
