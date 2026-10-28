@@ -205,20 +205,34 @@ export function registerCommands(
 
   // ── /team-join <channel> [agentName] ────────────────────────────
   pi.registerCommand("team-join", {
-    description: "Join a team channel and start polling. Usage: /team-join <channel> [agentName]",
+    description: "Join a team channel and start polling. Usage: /team-join <channel> [agentName] [instance]",
     getArgumentCompletions: makeArgumentCompletions(defineHint("team-join", {
-        summary: "Usage: /team-join <channel> [agentName]",
+        summary: "Usage: /team-join <channel> [agentName] [instance]",
         examples: [
           { value: "dev", label: "dev", description: "Join channel 'dev' (agent name from persona.yaml or session id)" },
           { value: "dev Alice", label: "dev Alice", description: "Join channel 'dev' as 'Alice'" },
           { value: "my-team Bob", label: "my-team Bob", description: "Join channel 'my-team' as 'Bob'" },
+          { value: "dev researcher 2", label: "dev researcher 2", description: "Join as 'researcher-2' (multi-instance; walls of role 'researcher')" },
         ],
       })),
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const channel = parts[0];
       if (!channel) {
-        ctx.ui.notify("Usage: /team-join <channel> [agentName]", "error");
+        ctx.ui.notify("Usage: /team-join <channel> [agentName] [instance]", "error");
+        return;
+      }
+
+      // Optional instance number (positive integer): joins as "<agentName>-<n>"
+      // so several sessions of one role can share a channel. The permission
+      // identity stays the role (see bootstrapMamoru) — only the channel
+      // identity gets the suffix.
+      const instanceRaw = parts[2];
+      if (instanceRaw !== undefined && !/^[1-9]\d*$/.test(instanceRaw)) {
+        ctx.ui.notify(
+          "Instance must be a positive integer: /team-join <channel> [agentName] [instance]",
+          "error",
+        );
         return;
       }
 
@@ -234,6 +248,9 @@ export function registerCommands(
       }
       if (!agentName) {
         agentName = joinPersona ? channelIdentity(joinPersona) : ctx.sessionManager.getSessionId();
+      }
+      if (instanceRaw !== undefined) {
+        agentName = `${agentName}-${instanceRaw}`;
       }
 
       // Check if already joined (per channel — M2 allows N channels per session)

@@ -97,7 +97,8 @@ describe("v2 field validation", () => {
 describe("permission-system bridge", () => {
   test("identity tag matches <active_agent name=\"...\"> and strips quotes", () => {
     const tag = personaIdentityTag({ name: "dev", channelName: "projx-dev" } as PersonaConfig);
-    expect(tag).toBe(`<active_agent name="projx-dev"></active_agent>`);
+    // Permission identity is the ROLE name — instances (dev-2, dev-3) share walls.
+    expect(tag).toBe(`<active_agent name="dev"></active_agent>`);
   });
 
   test("identity card carries workspace, channels, skills", () => {
@@ -134,7 +135,7 @@ describe("Mamoru injects identity card + bridge tag", () => {
     });
 
     const result = mamoru.buildSystemPromptAdditions("BASE");
-    expect(result?.systemPrompt).toContain(`<active_agent name="projx-dev"></active_agent>`);
+    expect(result?.systemPrompt).toContain(`<active_agent name="dev"></active_agent>`);
     expect(result?.systemPrompt).toContain(`Workspace (your permission scope): /work/dir`);
     expect(result?.systemPrompt).toContain(`You are "dev"`);
     expect(result?.systemPrompt).toContain(`channel identity is "projx-dev"`);

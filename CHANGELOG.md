@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — multi-instance roles (one role, N sessions)
+
+- `/team-join <channel> [agentName] [instance]` gains an instance number:
+  joins as `researcher-2`/`researcher-3`/… so several sessions of one role
+  can share a channel without identity takeover fights. Crash-rejoin stays
+  deterministic — rejoin with the same instance number to take over.
+- Permission identity is decoupled from channel identity: the persistent
+  `active_agent` marker and the system-prompt tag now carry the ROLE name
+  (`persona.name`), so all instances of a role share the same per-role
+  frontmatter walls (`<cwd>/.agents/<role>.md`). The identity card tells
+  the model its channel identity (`researcher-2`).
+
 ## 0.7.0 — identity registry, multi-channel sessions, digests
 
 Fork release (@yangguang760/pi-teammate), diverging from upstream v0.5.0.

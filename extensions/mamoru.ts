@@ -397,8 +397,8 @@ export class Mamoru {
           additions += `\n${line}`;
         }
       }
-      if (channelIdentity(this.persona) !== this.persona.name) {
-        additions += `\nYour channel identity is "${channelIdentity(this.persona)}" — teammates know you by that name.`;
+      if (this.agentName !== this.persona.name) {
+        additions += `\nYour channel identity is "${this.agentName}" — teammates know you by that name.`;
       }
       if (this.persona.systemPrompt) {
         additions += `\n\n${this.persona.systemPrompt}`;

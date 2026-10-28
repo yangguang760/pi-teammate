@@ -172,7 +172,10 @@ export function channelIdentity(persona: PersonaConfig): string {
  * per-agent permission frontmatter (<cwd>/.pi/agents/<agent>.md).
  */
 export function personaIdentityTag(persona: PersonaConfig): string {
-  return `<active_agent name="${channelIdentity(persona).replace(/"/g, "")}"></active_agent>`;
+  // Permission identity is the ROLE name, not the channel identity: multiple
+  // sessions of one role (researcher-1/2/3) share the same frontmatter walls
+  // (<cwd>/.pi/agents/<role>.md) while their channel identities differ.
+  return `<active_agent name="${persona.name.replace(/"/g, "")}"></active_agent>`;
 }
 
 /** Identity-card lines injected into the system prompt (workspace, channels, skills). */

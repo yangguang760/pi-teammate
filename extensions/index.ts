@@ -198,8 +198,13 @@ export default function (pi: ExtensionAPI) {
 
     // L1.5 permission bridge: persistent active-agent marker (persona may
     // differ per join). See session_start for the non-team path.
+    // Permission identity is the ROLE name (persona.name) so that multiple
+    // instances of one role (researcher-1/2/3, channel identities) share the
+    // same per-role frontmatter walls; agentName carries the instance suffix.
     try {
-      ctx.sessionManager.appendCustomEntry("active_agent", { name: agentName });
+      ctx.sessionManager.appendCustomEntry("active_agent", {
+        name: persona?.name ?? agentName,
+      });
     } catch {}
 
     // Start TTS poller for this channel (no-op if TTS not enabled, or
@@ -308,7 +313,7 @@ export default function (pi: ExtensionAPI) {
     if (resolvedPersona) {
       try {
         ctx.sessionManager.appendCustomEntry("active_agent", {
-          name: channelIdentity(resolvedPersona),
+          name: resolvedPersona.name,
         });
       } catch {}
     }
