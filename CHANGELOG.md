@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 — background poll must never kill the host
+
+- Fixed: a foreign identity takeover (overlapping short-lived sessions) deleted
+  the live session's agents row; the next background poll tick then failed on a
+  foreign-key violation inside a Node timer — an uncaught exception that killed
+  the whole pi process (exit 1). `pollOnce` now detects the lost identity and
+  detaches gracefully (timers cleared, warning logged); the poll timer wraps
+  every tick in a catch so background errors can never crash the host; and
+  `stop()` after a detach skips the leave broadcast (it would FK-fail too).
+
 ## 0.8.0 — multi-instance roles (one role, N sessions)
 
 - `/team-join <channel> [agentName] [instance]` gains an instance number:
