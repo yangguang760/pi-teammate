@@ -85,6 +85,8 @@ export class Mamoru {
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private leaseTimer: ReturnType<typeof setInterval> | null = null;
+  /** Set when a foreign takeover deleted our agents row — we stop polling instead of crashing the host. */
+  private detached = false;
   private startedAt: number | null = null;
   private status: AgentStatus = "available";
   private activeTask: ActiveTask | null = null;
@@ -180,7 +182,23 @@ export class Mamoru {
 
     // Start polling
     this.startedAt = Date.now();
-    this.pollTimer = setInterval(() => this.pollOnce(), this.config.pollIntervalMs);
+    this.pollTimer = setInterval(() => {
+      // A background poll must NEVER kill the host process: an uncaught
+      // exception inside a Node timer is process-fatal (a foreign takeover
+      // can delete our agents row mid-flight, making cursor writes fail with
+      // FK violations). Detach gracefully instead of crashing.
+      try {
+        this.pollOnce();
+      } catch (err: any) {
+        if (this.checkIdentityLost()) {
+          this.detach("identity taken over by another session");
+          return;
+        }
+        try {
+          this.ctx.ui.notify(`[teammate] poll error suppressed: ${err?.message ?? err}`, "warning");
+        } catch {}
+      }
+    }, this.config.pollIntervalMs);
 
     // Presence lease: renew on an extension timer, independent of the LLM.
     // A dead process stops renewing; peers see the lease expire within
@@ -206,6 +224,14 @@ export class Mamoru {
     if (this.leaseTimer !== null) {
       clearInterval(this.leaseTimer);
       this.leaseTimer = null;
+    }
+
+    // Detached (foreign takeover deleted our identity rows): a leave
+    // broadcast would FK-fail on from_agent — nothing left to clean up.
+    if (this.detached) {
+      this.status = "inactive";
+      this.startedAt = null;
+      return;
     }
 
     // Broadcast agent_leave
@@ -466,8 +492,49 @@ export class Mamoru {
 
   // ── Testable poll method ────────────────────────────────────────
 
+  /** True when our agents row is gone — a foreign session took over our identity. */
+  private checkIdentityLost(): boolean {
+    try {
+      return !getAgentBySession(this.db, this.sessionId);
+    } catch {
+      return true; // DB closed or unavailable — treat as lost
+    }
+  }
+
+  /** Gracefully detach after losing our identity (foreign takeover): stop
+   *  timers and polling instead of letting FK errors kill the host process. */
+  detach(reason: string): void {
+    if (this.detached) return;
+    this.detached = true;
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.leaseTimer !== null) {
+      clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+    }
+    this.logEvent("recv", "identity_lost", this.agentName, null, reason, false);
+    try {
+      this.ctx.ui.notify(`[teammate] Identity "${this.agentName}" ${reason} — this session detached from the channel.`, "warning");
+    } catch {}
+  }
+
+  /** Whether this Mamoru has detached from the channel (identity lost). */
+  isDetached(): boolean {
+    return this.detached;
+  }
+
   /** Execute one poll cycle. Public for testability. */
   pollOnce(): void {
+    if (this.detached) return;
+    if (this.checkIdentityLost()) {
+      // Another session took over our identity (overlapping short-lived
+      // sessions): our agents row is gone, so every cursor/message write
+      // would FK-fail. Detach instead of crashing the host.
+      this.detach("identity taken over by another session");
+      return;
+    }
     // Milestone gate engaged: hold ALL inbound traffic — messages stay unread
     // in the DB and flow after /team-resume (or after a crash+rejoin, thanks
     // to the takeover replay). Maintenance (sweep, retries, watchdog) runs.
