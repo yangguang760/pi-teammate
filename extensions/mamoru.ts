@@ -90,6 +90,8 @@ export class Mamoru {
   private startedAt: number | null = null;
   private status: AgentStatus = "available";
   private activeTask: ActiveTask | null = null;
+  private stuckSince: number | null = null;
+  private stuckSteers = 0;
   private outboundTasks: Map<number, OutboundTask> = new Map();
   private digestBuffer: { event: string; from: string; content: string; detail: string | null }[] = []; // M3-lite: informational messages merged into one block at the next turn boundary
   private eventLog: MamoruEventLog[] = [];
@@ -930,6 +932,10 @@ export class Mamoru {
   private setStatus(newStatus: AgentStatus): void {
     this.status = newStatus;
     updateAgentStatus(this.db, this.sessionId, newStatus);
+    if (newStatus === "available") {
+      this.stuckSince = null;
+      this.stuckSteers = 0;
+    }
   }
 
   /**
@@ -942,12 +948,46 @@ export class Mamoru {
       const isIdle = this.ctx.isIdle();
       if (!isIdle && this.status === "available") {
         this.setStatus("busy");
-      } else if (isIdle && this.status === "busy" && !this.activeTask) {
-        this.setStatus("available");
+      } else if (isIdle && this.status === "busy") {
+        if (this.activeTask) {
+          // Turn ended while a task is still open (model replied with
+          // task_update instead of task_done): nothing else clears activeTask,
+          // so this agent stays busy and rejects every new task_req until the
+          // requester sends task_cancel. Nudge the model (bounded) to finish
+          // or report instead of hanging.
+          this.selfHealStuckTask();
+        } else {
+          this.setStatus("available");
+        }
+      } else {
+        this.stuckSince = null;
       }
     } catch {
       // ctx.isIdle() may not be available in all contexts
     }
+  }
+
+  /**
+   * Self-heal for the stuck-busy deadlock: nudge our own LLM (steer) to
+   * either continue the task or send task_done/task_fail. Bounded: at most
+   * MAX_STEERS per task, at least STEER_EVERY_MS apart; counters reset when
+   * status returns to "available" (done/fail/cancel).
+   */
+  private selfHealStuckTask(): void {
+    const STEER_EVERY_MS = 10 * 60_000;
+    const MAX_STEERS = 3;
+    const now = Date.now();
+    if (this.stuckSince === null) {
+      this.stuckSince = now;
+      return;
+    }
+    if (now - this.stuckSince < STEER_EVERY_MS || this.stuckSteers >= MAX_STEERS) return;
+    this.stuckSteers += 1;
+    this.stuckSince = now;
+    const taskId = this.activeTask?.taskId ?? null;
+    const text = `[MAMORU self-heal] task #${taskId ?? "?"} 仍标记为 busy，但你已空闲且未回报完成状态。要么继续完成该任务，要么立即补发 task_done/task_fail。（第 ${this.stuckSteers}/${MAX_STEERS} 次提醒）`;
+    this.logEvent("sent", "self_heal_steer", "(self)", taskId, text, true);
+    this.pi.sendUserMessage(text, { deliverAs: "steer" });
   }
 
   private autoReply(
