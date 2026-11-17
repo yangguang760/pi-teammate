@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2 — stuck-busy self-heal
+
+- Fixed: an agent whose turn ended with `task_update` (instead of `task_done`/`task_fail`) stayed `busy` forever. `activeTask` is only cleared by done/fail/cancel, so the `syncIdleStatus` fallback (`isIdle && busy && !activeTask`) never fired — the agent then auto-rejected every new `task_req` until the original requester sent `task_cancel`.
+- `syncIdleStatus` now detects idle+busy with an open task and nudges the agent's own model over the steer channel (`sendUserMessage(…, { deliverAs: "steer" })`) to either continue the task or send `task_done`/`task_fail`. Bounded: at most 3 nudges per task, 10 minutes apart; counters reset on return to `available`.
+
 ## 0.8.1 — background poll must never kill the host
 
 - Fixed: a foreign identity takeover (overlapping short-lived sessions) deleted
